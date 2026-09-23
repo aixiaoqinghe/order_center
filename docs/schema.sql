@@ -65,3 +65,14 @@ create table if not exists `idempotent` (
 	`idempotent_createtime` datetime not null default current_timestamp comment '收到时间',
 	primary key(`request_id`)
 ) engine = InnoDB default charset=utf8mb4;
+
+-- 设计理由：死信记录表，便于人工排查原因
+create table if not exists `dlx_msg` (
+	`msg_id` bigint not null comment '消息id,主键',
+	`msg_content` text not null comment '消息内容',
+	`nack_reason` varchar(256) not null comment '失败原因',
+	`nack_type` varchar(100) not null comment '失败类型',
+	`msg_createtime` datetime not null default current_timestamp comment '创建时间',
+	`msg_status` tinyint not null default 0 comment '处理状态: 0未处理 1已处理',
+	primary key (`msg_id`)
+) engine = InnoDB default charset=utf8mb4;
