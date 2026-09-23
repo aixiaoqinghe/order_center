@@ -16,8 +16,18 @@ env/
 .vscode/
 *.swp
 *.swo
-
 .DS_Store
 Thumbs.db
 
 *.log
+logs/
+
+*.secret
+config.local.py
+
+*backup*.sql
+*dump*.sql
+
+.coverage
+htmlcov/
+.pytest_cache/
