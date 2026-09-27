@@ -72,7 +72,6 @@
     "data": {
         "user_id": 1,
         "user_name": test_001,
-        "user_password": 123456,
         "user_nickname": "用户1",
         "user_phonenumber": "13800000000",
         "user_createtime": "(当时时间)"
@@ -93,8 +92,8 @@
 - **入参**:
   | 字段 | 类型 | 必填 | 校验规则 |
   | --- | --- | --- | --- |
-  | page | int | 是 | 1-100 |
-  | size | int | 是 | 10-50 |
+  | page | int | 否 | 1-100,默认1 |
+  | size | int | 否 | 10-50,默认30 |
 - **出参数**:
   ```
     json
@@ -103,8 +102,8 @@
       "msg": "success found", 
       "data":{
           "list": [
-            {"product_id": 1, "product_name": "商品1", "product_type": "电子产品", "product_amount": 99.9}, 
-            {"product_id": 2, "product_name": "商品2", "product_type": "生活用品", "product_amount": 88.8}
+            {"product_id": 1, "product_name": "商品1", "product_type": "电子产品", "product_amount": "99.9"}, 
+            {"product_id": 2, "product_name": "商品2", "product_type": "生活用品", "product_amount": "88.8"}
           ],
           "total": 1000,
           "page": 1,        // 当前页码
@@ -136,7 +135,7 @@
         "product_name": "商品1",
         "product_createtime": "(当时时间)",
         "product_type": "电子产品",
-        "product_amount": 99.9,
+        "product_amount": "99.9",
         "available_stock": 20
         } 
     }
@@ -155,8 +154,9 @@
   | 字段 | 类型 | 必填 | 校验规则 |
   | --- | --- | --- | --- |
   | product_name | string | 是 | 4-20位 |
-  | product_type | string | 否 | 6-20位 |
-  | product_amount | float | 是 | 0-1000000 |
+  | product_type | string | 否 | 2-20位 |
+  | product_amount | string(金额字符串) | 是 | 0-1000000 |
+  | total_stock | int | 是 | 0-1000000 |
 - **出参数**:
   ```
     json
@@ -165,7 +165,8 @@
     "data": {
         "product_id": 200,
         "product_name": "商品200",
-        "product_amount": 99.9
+        "product_amount": "99.9",
+        "total_stock": 20
         } 
     }
   ```
