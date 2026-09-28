@@ -5,41 +5,49 @@ from app.database import engine
 
 from app.routers import user as user_router
 from app.routers import product as product_router
+from app.routers import order as order_router
 from app.utils.exceptions import (
+    InventoryNotFoundError,
+    OrderForbiddenError,
+    OrderNotFoundError,
+    OrderStatusError,
     PasswordError,
     ProductNotFoundError,
+    StockNotEnoughError,
     UserAlreadyExistsError,
     UserNotFoundError,
 )
-from app.routers import product as product_router
 
 app = FastAPI(title="Order Center", version="0.1.0")
 
-app.include_router(product_router.router)
 app.include_router(user_router.router)
+app.include_router(product_router.router)
+app.include_router(order_router.router)
 
 @app.get("/health")
 def health():
     """健康检查：验证服务和 MySQL 连接"""
     try:
-        # 拿一个连接执行 SELECT 1, 验证 DB 可用
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return {"status": "ok", "db": "ok"}
     except Exception as e:
-        # DB 不可用,返回503(服务不可用),不是500(服务器内部错误)
         return JSONResponse(
-            status_code = 503,
-            content = {"status": "error", "db": "unavailable", "detail": str(e)}
+            status_code=503,
+            content={"status": "error", "db": "unavailable", "detail": str(e)}
         )
 
-# 注册 router
-app.include_router(user_router.router)
-
-# 全局异常处理器：业务异常都转400
 @app.exception_handler(UserAlreadyExistsError)
 @app.exception_handler(UserNotFoundError)
 @app.exception_handler(PasswordError)
 @app.exception_handler(ProductNotFoundError)
+@app.exception_handler(InventoryNotFoundError)
+@app.exception_handler(StockNotEnoughError)
+@app.exception_handler(OrderNotFoundError)
+@app.exception_handler(OrderStatusError)
 async def business_error_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=400, content={"code": 400, "msg": str(exc), "data": None})
+
+@app.exception_handler(OrderForbiddenError)
+async def forbidden_handler(request: Request, exc: OrderForbiddenError):
+    return JSONResponse(status_code=403, content={"code": 403, "msg": str(exc), "data": None})
