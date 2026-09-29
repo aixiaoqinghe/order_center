@@ -13,12 +13,15 @@ from app.schemas.order import (
 )
 from app.services import order_service
 
+from fastapi import Depends
+from app.redis_client import get_redis
+
 router = APIRouter(prefix="/api/order", tags=["order"])
 
 @router.post("/create",response_model=Response[OrderCreateOut])
-def create_order(data: OrderCreate, db: Session = Depends(get_db)):
+async def create_order(data: OrderCreate, db: Session = Depends(get_db), redis=Depends(get_redis)):
     """创建订单"""
-    result = order_service.create_order(db, data)
+    result = await order_service.create_order(db, redis, data.user_id, data)
     return Response(msg="success created", data=result)
 
 @router.get("/detail/{order_id}", response_model=Response[OrderDetailOut])

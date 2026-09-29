@@ -1,6 +1,8 @@
 from decimal import Decimal
+import asyncio
 
 from sqlalchemy.orm import Session
+import logging
 
 from app.models.inventory import Inventory
 from app.models.order import Order, OrderItem
@@ -15,73 +17,123 @@ from app.utils.exceptions import (
     ProductNotFoundError,
     StockNotEnoughError,
     UserNotFoundError,
+    LockAcquireFailedError,
 )
 
-def create_order(db: Session, data: OrderCreate) -> dict:
-    """创建订单(无并发版):校验 -> 扣 locked -> 写 order + order_item"""
-    try:
-        # 1.校验 user
-        user = db.query(User).filter(User.user_id == data.user_id).first()
-        if user is None:
-            raise UserNotFoundError(f"用户不存在:{data.user_id}")
-        # 2.遍历 items: 查商品、查库存、校验、扣 locked、记快照
-        item_snapshots = []
-        total_num = 0
-        total_amount = Decimal("0.00")
-        for item in data.items:
-            product = db.query(Product).filter(Product.product_id == item.product_id).first()
-            if product is None:
-                raise ProductNotFoundError(f"商品不存在:{item.product_id}")
-            inventory = db.query(Inventory).filter(Inventory.product_id == item.product_id).first()
-            if inventory is None:
-                raise StockNotEnoughError(f"商品无库存记录:{item.product_id}")
-            available = inventory.total_stock - inventory.locked_stock
-            if available < item.order_item_num:
-                raise StockNotEnoughError(
-                    f"商品库存不足:{item.product_id}, 可售={available}, 需要={item.order_item_num}"
-                )
-            # 扣锁库存
-            inventory.locked_stock += item.order_item_num
-            # 快照
-            subtotal = product.product_amount * item.order_item_num
-            item_snapshots.append({
-                "product_id": product.product_id,
-                "product_name": product.product_name,
-                "order_item_num": item.order_item_num,
-                "order_item_amount": product.product_amount,
-                "order_item_subtotal": subtotal
-            })
-            total_num += item.order_item_num
-            total_amount += subtotal
-        # 3.写 order
-        order = Order(
-            user_id=data.user_id,
-            order_total_num=total_num,
-            order_total_amount=total_amount,
-            order_status=0
-        )
-        db.add(order)
-        db.flush()    # 拿 order_id
-        # 4.写 order_item
-        for snap in item_snapshots:
-            db.add(OrderItem(order_id=order.order_id, **snap))
-        db.commit()
-        db.refresh(order)
+from collections import defaultdict
+from app.utils.lock import acquire, release
 
-    except Exception:
-        db.rollback()
-        raise
-        # 5.拼返回 dict
+logger = logging.getLogger(__name__)
+
+def _do_critical_section(db, merged: dict, user_id: int) -> dict:
+    """同步临界区:库存校验+加锁+建单+commit,丢线程池跑不阻塞事件循环"""
+    total_num = 0
+    total_amount = 0
+    item_snapshots = []
+
+    for pid, m in merged.items():
+        inventory = db.query(Inventory).filter_by(product_id=pid).first()
+        if inventory is None:
+            raise InventoryNotFoundError()
+        if inventory.total_stock - inventory.locked_stock < m["order_item_num"]:
+            raise StockNotEnoughError()
+
+        inventory.locked_stock += m["order_item_num"]
+
+        subtotal = m["order_item_amount"] * m["order_item_num"]
+
+        item_snapshots.append({
+            "product_id": m["product_id"],
+            "product_name": m["product_name"],
+            "order_item_num": m["order_item_num"],
+            "order_item_amount": m["order_item_amount"],
+            "order_item_subtotal": subtotal,
+        })
+        total_num += m["order_item_num"]
+        total_amount += subtotal
+
+    order = Order(
+        user_id=user_id,
+        order_status=0,
+        order_total_num=total_num,
+        order_total_amount=total_amount,
+    )
+    db.add(order)
+    db.flush()
+
+    for snap in item_snapshots:
+        db.add(OrderItem(order_id=order.order_id, **snap))
+
+    db.commit()
+    db.refresh(order)
+
+    items = db.query(OrderItem).filter(OrderItem.order_id == order.order_id).all()
+
     return {
         "order_id": order.order_id,
         "user_id": order.user_id,
         "order_total_num": order.order_total_num,
-        "order_createtime": order.order_createtime,
         "order_total_amount": order.order_total_amount,
+        "order_createtime": order.order_createtime,
         "order_status": order.order_status,
         "order_cancel_reason": order.order_cancel_reason,
-        "items": item_snapshots,
+        "items": [
+            {
+                "product_id": it.product_id,
+                "product_name": it.product_name,
+                "order_item_num": it.order_item_num,
+                "order_item_amount": it.order_item_amount,
+                "order_item_subtotal": it.order_item_subtotal,
+            }
+            for it in items
+        ],
     }
+
+async def create_order(db, redis, user_id, data):
+    # 同一 product_id 只保留一条，数量累加，防重复提交把自己锁挡死 / order_item 撞主键
+    merged = {}
+    for item in data.items:
+        product = db.query(Product).filter_by(product_id=item.product_id).first()
+        if product is None:
+            raise ProductNotFoundError()
+
+        if item.product_id not in merged:
+            merged[item.product_id] = {
+                "product_id": item.product_id,
+                "product_name": product.product_name,
+                "order_item_num": 0,
+                "order_item_amount": product.product_amount,    # 单价
+            }
+        merged[item.product_id]["order_item_num"] += item.order_item_num
+
+    # 升序 product_id + 加锁
+    product_ids = sorted(merged.keys())
+
+    held_locks = {}
+    try:
+        for pid in product_ids:
+            value = await acquire(redis, pid)
+            if value is None:
+                raise LockAcquireFailedError()
+            held_locks[pid] = value
+
+        # 临界区:同步db操作丢线程池,不阻塞事件循环,让其他请求能及时抢锁
+        result = await asyncio.to_thread(_do_critical_section, db, merged, user_id)
+
+        return result
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        # 逆序释放
+        for pid in reversed(list(held_locks.keys())):
+            try:
+                await release(redis, pid, held_locks[pid])
+            except Exception:
+                # 释放锁的异常是warn不raise:因为锁有 TTL,即使锁释放失败，60s后Redis回自动清理掉
+                logger.warning(f"release lock failed: product_id={pid}")
 
 def get_order_detail(db: Session, order_id: int, user_id: int) -> dict:
     """订单详情:查 order -> 校验归属 -> 查 items"""

@@ -8,6 +8,7 @@ from app.routers import product as product_router
 from app.routers import order as order_router
 from app.utils.exceptions import (
     InventoryNotFoundError,
+    LockAcquireFailedError,
     OrderForbiddenError,
     OrderNotFoundError,
     OrderStatusError,
@@ -45,6 +46,7 @@ def health():
 @app.exception_handler(StockNotEnoughError)
 @app.exception_handler(OrderNotFoundError)
 @app.exception_handler(OrderStatusError)
+@app.exception_handler(LockAcquireFailedError)
 async def business_error_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=400, content={"code": 400, "msg": str(exc), "data": None})
 

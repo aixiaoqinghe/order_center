@@ -24,4 +24,9 @@ class Settings(BaseSettings):
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"
         )
 
+    # Redis 配置
+    REDIS_HOST: str="localhost"
+    REDIS_PORT: int=6379
+    REDIS_PASSWORD: str=""
+
 settings = Settings()        # 全局单例，其他文件 import settings 即可
