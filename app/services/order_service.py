@@ -23,51 +23,75 @@ from app.utils.exceptions import (
 from collections import defaultdict
 from app.utils.lock import acquire, release
 
+from app.mq_client import publish_order_created
+
 logger = logging.getLogger(__name__)
 
-def _do_critical_section(db, merged: dict, user_id: int) -> dict:
-    """同步临界区:库存校验+加锁+建单+commit,丢线程池跑不阻塞事件循环"""
-    total_num = 0
-    total_amount = 0
-    item_snapshots = []
+async def _do_critical_section(db, merged: dict, user_id: int) -> dict:
+    """临界区:同步DB操作丢线程池 → flush拿到order_id → 发MQ → 再commit, 全程不阻塞事件循环"""
 
-    for pid, m in merged.items():
-        inventory = db.query(Inventory).filter_by(product_id=pid).first()
-        if inventory is None:
-            raise InventoryNotFoundError()
-        if inventory.total_stock - inventory.locked_stock < m["order_item_num"]:
-            raise StockNotEnoughError()
+    def _db_flush():
+        """阶段1:库存校验 + 建单 + flush(拿到 order_id, 但不 commit)"""
+        total_num = 0
+        total_amount = 0
+        item_snapshots = []
 
-        inventory.locked_stock += m["order_item_num"]
+        for pid, m in merged.items():
+            inventory = db.query(Inventory).filter_by(product_id=pid).first()
+            if inventory is None:
+                raise InventoryNotFoundError()
+            if inventory.total_stock - inventory.locked_stock < m["order_item_num"]:
+                raise StockNotEnoughError()
 
-        subtotal = m["order_item_amount"] * m["order_item_num"]
+            inventory.locked_stock += m["order_item_num"]
 
-        item_snapshots.append({
-            "product_id": m["product_id"],
-            "product_name": m["product_name"],
-            "order_item_num": m["order_item_num"],
-            "order_item_amount": m["order_item_amount"],
-            "order_item_subtotal": subtotal,
-        })
-        total_num += m["order_item_num"]
-        total_amount += subtotal
+            subtotal = m["order_item_amount"] * m["order_item_num"]
 
-    order = Order(
-        user_id=user_id,
-        order_status=0,
-        order_total_num=total_num,
-        order_total_amount=total_amount,
-    )
-    db.add(order)
-    db.flush()
+            item_snapshots.append({
+                "product_id": m["product_id"],
+                "product_name": m["product_name"],
+                "order_item_num": m["order_item_num"],
+                "order_item_amount": m["order_item_amount"],
+                "order_item_subtotal": subtotal,
+            })
+            total_num += m["order_item_num"]
+            total_amount += subtotal
 
-    for snap in item_snapshots:
-        db.add(OrderItem(order_id=order.order_id, **snap))
+        order = Order(
+            user_id=user_id,
+            order_status=0,
+            order_total_num=total_num,
+            order_total_amount=total_amount,
+        )
+        db.add(order)
+        db.flush()
 
-    db.commit()
-    db.refresh(order)
+        for snap in item_snapshots:
+            db.add(OrderItem(order_id=order.order_id, **snap))
 
-    items = db.query(OrderItem).filter(OrderItem.order_id == order.order_id).all()
+        mq_items = [
+            {
+                "product_id": pid,
+                "order_item_num": m["order_item_num"],
+                "order_item_amount": str(m["order_item_amount"]),
+            }
+            for pid, m in merged.items()
+        ]
+        return order.order_id, mq_items
+
+    order_id, mq_items = await asyncio.to_thread(_db_flush)
+
+    await publish_order_created(order_id, user_id, mq_items)
+
+    def _db_commit():
+        """阶段2:commit + refresh + 返回完整订单数据"""
+        db.commit()
+        order = db.query(Order).filter(Order.order_id == order_id).first()
+        db.refresh(order)
+        items = db.query(OrderItem).filter(OrderItem.order_id == order_id).all()
+        return order, items
+
+    order, items = await asyncio.to_thread(_db_commit)
 
     return {
         "order_id": order.order_id,
@@ -117,8 +141,7 @@ async def create_order(db, redis, user_id, data):
                 raise LockAcquireFailedError()
             held_locks[pid] = value
 
-        # 临界区:同步db操作丢线程池,不阻塞事件循环,让其他请求能及时抢锁
-        result = await asyncio.to_thread(_do_critical_section, db, merged, user_id)
+        result = await _do_critical_section(db, merged, user_id)
 
         return result
 

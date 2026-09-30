@@ -29,4 +29,11 @@ class Settings(BaseSettings):
     REDIS_PORT: int=6379
     REDIS_PASSWORD: str=""
 
+    # RabbitMQ 配置
+    RABBITMQ_HOST: str="localhost"
+    RABBITMQ_PORT: int=5672
+    RABBITMQ_LOGIN: str="guest"
+    RABBITMQ_PASSWORD: str="guest"
+    RABBITMQ_VHOST: str="/"
+
 settings = Settings()        # 全局单例，其他文件 import settings 即可
