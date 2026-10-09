@@ -76,3 +76,12 @@ create table if not exists `dlx_msg` (
 	`msg_status` tinyint not null default 0 comment '处理状态: 0未处理 1已处理',
 	primary key (`msg_id`)
 ) engine = InnoDB default charset=utf8mb4;
+
+-- 设计理由：预防消费者重复处理消息，实现消费者幂等判断
+create table if not exists `consumer_idempotent`(
+	`order_id` bigint not null comment '订单id,主键',
+	`consume_status` tinyint not null comment '消费状态:0处理中 1成功 2失败',
+	`consume_createtime` datetime not null default current_timestamp comment '消费时间',
+	`result_msg` text not null comment '下单返回消息',
+	primary key(`order_id`)
+) engine = InnoDB default charset=utf8mb4;

@@ -37,3 +37,7 @@ class InventoryNotFoundError(Exception):
 class LockAcquireFailedError(Exception):
     def __init__(self, msg: str = "系统繁忙，稍后重试"):
         super().__init__(msg)
+
+class ConsumeStockError(Exception):
+    """消费者扣库存失败：库存不足或商品不存在(UPDATE 影响 0 行)"""
+    pass

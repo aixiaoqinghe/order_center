@@ -9,13 +9,16 @@ _exchange = None
 
 EXCHANGE_NAME = "order.exchange"
 QUEUE_NAME = "order.create.queue"
+RETRY_QUEUE_NAME = "order.retry.queue"
+DLX_QUEUE_NAME = "order.dlx.queue"
 ROUTING_KEY = "order.create"
+RETRY_ROUTING_KEY = "order.retry"
+DLX_ROUTING_KEY = "order.dlx"
 
-async def get_mq():
-    """懒加载单例：首次调用建连接，断了重建。返回 exchange。"""
+async def get_connection():
+    """懒加载单例: 只负责 connection, 断了重建"""
     global _connection, _channel, _exchange
 
-    # 无连接或连接已关闭 -> 重建
     if _connection is None or _connection.is_closed:
         _connection = await aio_pika.connect_robust(
             host=settings.RABBITMQ_HOST,
@@ -24,20 +27,51 @@ async def get_mq():
             password=settings.RABBITMQ_PASSWORD,
             virtualhost=settings.RABBITMQ_VHOST,
         )
-        _channel = await _connection.channel()
+        # connection 重建 -> channel/exchange 置 None,下次 get_mq 自然重建
+        _channel = None
+        _exchange  =None
 
-        # 声明 topic 交换机m durable 持久化
+    return _connection
+
+async def get_mq():
+    """生产者用: 拿 connection -> 建 channel/exchange, 返回 exchange"""
+    global _channel, _exchange
+
+    connection = await get_connection()
+
+    if _channel is None or _channel.is_closed:
+        _channel = await connection.channel()
+
+        # 声明 topic 交换机，durable 持久化
         _exchange = await _channel.declare_exchange(
-            EXCHANGE_NAME,
-            aio_pika.ExchangeType.TOPIC,
-            durable=True
+            EXCHANGE_NAME, aio_pika.ExchangeType.TOPIC, durable=True
         )
+
         # 声明队列, durable 持久化
         queue = await _channel.declare_queue(QUEUE_NAME, durable=True)
+
         # 绑定: routing_key 匹配 order.create 的消息进这个队列
         await queue.bind(_exchange, routing_key=ROUTING_KEY)
 
+        # 延迟队列：消息 TTL 5s, 过期后按 dead-letter 配置回主队列
+        retry_queue = await _channel.declare_queue(
+            RETRY_QUEUE_NAME,
+            durable=True,
+            arguments={
+                "x-message-ttl": 5000,                             # 5s
+                "x-dead-letter-exchange": EXCHANGE_NAME,           # 过期后回到主 exchange
+                "x-dead-letter-routing-key": ROUTING_KEY,          # 路由键变回 order.create
+            },
+        )
+        # 延迟队列绑定: routing_key = order.retry 的消息进它
+        await retry_queue.bind(_exchange, routing_key=RETRY_ROUTING_KEY)
+
+        # 死信队列
+        dlx_queue = await _channel.declare_queue(DLX_QUEUE_NAME, durable=True)
+        await dlx_queue.bind(_exchange, routing_key=DLX_ROUTING_KEY)
+
     return _exchange
+
 
 async def publish_order_created(order_id: int, user_id: int, items: list):
     """发送订单创建消息(持久化)"""

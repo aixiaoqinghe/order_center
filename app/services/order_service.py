@@ -1,6 +1,8 @@
 from decimal import Decimal
 import asyncio
 
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 import logging
 
@@ -18,6 +20,7 @@ from app.utils.exceptions import (
     StockNotEnoughError,
     UserNotFoundError,
     LockAcquireFailedError,
+    ConsumeStockError
 )
 
 from collections import defaultdict
@@ -224,7 +227,7 @@ def get_order_list(db: Session, user_id: int, page: int, size: int) -> dict:
     }
 
 def cancel_order(db: Session, user_id: int,order_id: int) -> dict:
-    """取消订单：校验状态 -> 回滚库存(locked -= n) -> 改 status/reason"""
+    """取消订单：校验状态 -> 回滚库存(total += n, locked -= n) -> 改 status/reason"""
     try:
         order = db.query(Order).filter(Order.order_id == order_id).first()
         if order is None:
@@ -236,13 +239,14 @@ def cancel_order(db: Session, user_id: int,order_id: int) -> dict:
         if order.order_status != 0:
             raise OrderStatusError(f"订单当前状态不允许取消:{order.order_status}")
 
-        # 回滚库存: locked -= n (简化版，total 先不动)
+        # 回滚库存: total += n, locked -= n
         items = db.query(OrderItem).filter(OrderItem.order_id == order_id).all()
         for it in items:
             inventory = db.query(Inventory).filter(Inventory.product_id == it.product_id).first()
 
             if inventory is None:
                 raise InventoryNotFoundError(f"库存记录不存在: {it.product_id}")
+            inventory.total_stock += it.order_item_num
             inventory.locked_stock -= it.order_item_num
         # 改状态
         order.order_status = 3
@@ -260,3 +264,44 @@ def cancel_order(db: Session, user_id: int,order_id: int) -> dict:
         "order_status": order.order_status,
         "order_cancel_reason": order.order_cancel_reason,
     }
+
+async def consume_order(db, redis, order_id: int, items: list):
+    """消费者扣库存 + 幂等(两层 Redis setnx + DB 唯一约束)"""
+
+    # 1. Redis 幂等：抢 key, 抢不到说明已处理
+    key = f"idem:order:{order_id}"
+    ok = await redis.set(key, "1", nx=True, ex=7200)   # TTL 2h
+    if not ok:
+        logger.warning(f"[幂等拦截] Redis hit, order_id={order_id}")
+        return       # key已存在,已处理，正常返回(调用方 ack)
+
+    # 2. DB 幂等：插占位记录(单独事务 commit, 失败残留 status=0)
+    try:
+        db.execute(text(
+            "INSERT INTO consumer_idempotent(order_id, consume_status, result_msg)"
+            "VALUES (:oid, 0, :msg)"
+        ), {"oid": order_id, "msg": "正在处理该消息中"})
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        logger.warning(f"[幂等拦截] DB hit, order_id={order_id}")
+        return    # 已处理，正常返回
+
+    # 3. 每个 item 原子扣库存
+    for item in items:
+        pid = item["product_id"]
+        n = item["order_item_num"]
+        result = db.execute(text(
+            "UPDATE inventory SET total_stock = total_stock - :n, "
+            "locked_stock = locked_stock - :n "
+            "WHERE product_id = :pid AND locked_stock >= :n"
+        ), {"n": n, "pid": pid})
+        if result.rowcount == 0:
+            raise ConsumeStockError(f"扣库存失败: product_id={pid}, n={n}")
+
+    # 4.更新幂等记录为成功
+    db.execute(text(
+        "UPDATE consumer_idempotent SET consume_status = 1, result_msg = :msg "
+        "WHERE order_id = :oid"
+    ), {"msg": "该消息已经处理成功", "oid": order_id})
+    db.commit()
