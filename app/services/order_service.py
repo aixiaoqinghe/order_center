@@ -26,7 +26,7 @@ from app.utils.exceptions import (
 from collections import defaultdict
 from app.utils.lock import acquire, release
 
-from app.mq_client import publish_order_created
+from app.mq_client import publish_order_created, publish_order_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,8 @@ async def _do_critical_section(db, merged: dict, user_id: int) -> dict:
         return order, items
 
     order, items = await asyncio.to_thread(_db_commit)
+
+    await publish_order_timeout(order_id)
 
     return {
         "order_id": order.order_id,
@@ -266,26 +268,46 @@ def cancel_order(db: Session, user_id: int,order_id: int) -> dict:
     }
 
 async def consume_order(db, redis, order_id: int, items: list):
-    """消费者扣库存 + 幂等(两层 Redis setnx + DB 唯一约束)"""
+    """消费者扣库存 + 幂等(三层 Redis setnx + DB 唯一约束 + 查 consumer_idempotent 状态判断)"""
 
-    # 1. Redis 幂等：抢 key, 抢不到说明已处理
+    # 1. 第一层幂等：Redis 幂等：抢 key, 抢不到说明已处理
     key = f"idem:order:{order_id}"
     ok = await redis.set(key, "1", nx=True, ex=7200)   # TTL 2h
     if not ok:
         logger.warning(f"[幂等拦截] Redis hit, order_id={order_id}")
         return       # key已存在,已处理，正常返回(调用方 ack)
 
-    # 2. DB 幂等：插占位记录(单独事务 commit, 失败残留 status=0)
-    try:
-        db.execute(text(
-            "INSERT INTO consumer_idempotent(order_id, consume_status, result_msg)"
-            "VALUES (:oid, 0, :msg)"
-        ), {"oid": order_id, "msg": "正在处理该消息中"})
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        logger.warning(f"[幂等拦截] DB hit, order_id={order_id}")
-        return    # 已处理，正常返回
+    # 2. 第三层幂等：查 consumer_idempotent 状态判断
+    # 位置: setnx 之后、插入 consumer_idempotent 之前
+    # 目的: 防"处理中崩溃"留下的半成品(status=0) 和 "失败残留" (status=2)
+    row = db.execute(
+        text("SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid"),
+        {"oid": order_id}
+    ).fetchone()
+
+    need_insert = True    # 是否需要插 consumer_idempotent
+    if row is not None:
+        status = row[0]
+        if status == 1:
+            # 已成功处理，直接return 
+            return
+        # status == 0 或 2: 半成品/失败，继续往下处理，但不用再插了
+        need_insert = False
+
+    # 3. 第二层幂等：DB 幂等：插占位记录(单独事务 commit, 失败残留 status=0)
+    if need_insert:
+        try:
+            db.execute(text(
+                "INSERT INTO consumer_idempotent(order_id, consume_status, result_msg)"
+                "VALUES (:oid, 0, :msg)"
+            ), {"oid": order_id, "msg": "正在处理该消息中"})
+            db.commit()
+        except IntegrityError:
+            # 主键冲突：说明这条记录已存在(可能 Redis 失效导致第一层没拦住)
+            # catch 后跳过插入，直接往下扣库存
+            db.rollback()
+            logger.warning(f"[幂等拦截] DB hit, order_id={order_id}")
+            return    # 已处理，正常返回
 
     # 3. 每个 item 原子扣库存
     for item in items:
@@ -300,8 +322,62 @@ async def consume_order(db, redis, order_id: int, items: list):
             raise ConsumeStockError(f"扣库存失败: product_id={pid}, n={n}")
 
     # 4.更新幂等记录为成功
+    # 更新 status=1(成功),不管是need_insert=True 还是 False,最终都要更新成1
     db.execute(text(
         "UPDATE consumer_idempotent SET consume_status = 1, result_msg = :msg "
         "WHERE order_id = :oid"
     ), {"msg": "该消息已经处理成功", "oid": order_id})
+    db.commit()
+
+async def consume_order_timeout(db, order_id: int):
+    """
+    Day9: 超时关单消费逻辑
+    - status = 0 待支付 -> 关单 + 回滚库存
+    - status != 0 -> 直接返回(幂等：状态已流转，不再关)
+    - 订单不存在 -> 直接返回
+    """
+    order = db.execute(
+        text("SELECT order_status FROM `order` WHERE order_id = :oid"),
+        {"oid": order_id}
+    ).fetchone()
+
+    if order is None:
+        return   # 订单不存在, ACK
+
+    status = order[0]
+    if status != 0:
+        return   # 已支付/已完成/已取消, 不关, ACK(幂等)
+
+    # status=0, 关单: 查 order_item 拿商品 + 数量
+    items = db.execute(
+        text(
+            "SELECT product_id, order_item_num FROM order_item "
+            "WHERE order_id = :oid"
+        ),
+        {"oid": order_id}
+    ).fetchall()
+
+    # 回滚库存: total += n, locked -= n, 条件 locked >= n 防负数
+    for item in items:
+        product_id, num = item[0], item[1]
+        result = db.execute(
+            text(
+                "UPDATE inventory SET total_stock = total_stock + :n, " 
+                "locked_stock = locked_stock - :n "
+                "WHERE product_id = :pid AND locked_stock >= :n"
+            ),
+            {"n": num, "pid": product_id}
+        )
+        if result.rowcount == 0:
+            # 回滚失败(locked < n, 数据异常) -> 业务失败，抛异常进死信
+            raise ConsumeStockError(f"超时回滚库存失败: product_id={product_id}")
+
+    # 改订单状态为已取消 + 原因
+    db.execute(
+        text(
+            "UPDATE `order` SET order_status = 3, "
+            "order_cancel_reason = :reason WHERE order_id = :oid"
+        ),
+        {"oid": order_id, "reason": "超时未支付"}
+    )
     db.commit()

@@ -15,6 +15,12 @@ ROUTING_KEY = "order.create"
 RETRY_ROUTING_KEY = "order.retry"
 DLX_ROUTING_KEY = "order.dlx"
 
+# 超时关单队列
+TIMEOUT_DELAY_QUEUE = "order.timeout.delay.queue"
+TIMEOUT_QUEUE = "order.timeout.queue"
+TIMEOUT_DELAY_ROUTING_KEY = "order.timeout.delay"
+TIMEOUT_ROUTING_KEY = "order.timeout"
+
 async def get_connection():
     """懒加载单例: 只负责 connection, 断了重建"""
     global _connection, _channel, _exchange
@@ -70,7 +76,28 @@ async def get_mq():
         dlx_queue = await _channel.declare_queue(DLX_QUEUE_NAME, durable=True)
         await dlx_queue.bind(_exchange, routing_key=DLX_ROUTING_KEY)
 
+        # 超时关单队列(15min TTL)
+        await _declare_timeout_queues(_channel, _exchange)
+
     return _exchange
+
+
+async def _declare_timeout_queues(channel, exchange):
+    """超时关单：延迟队列15min TTL -> 过期回到主exchange -> 消费队列接住"""
+
+    delay_queue = await channel.declare_queue(
+        TIMEOUT_DELAY_QUEUE,
+        durable=True,
+        arguments={
+            "x-message-ttl": 900000,
+            "x-dead-letter-exchange": EXCHANGE_NAME,
+            "x-dead-letter-routing-key": TIMEOUT_ROUTING_KEY,
+        },
+    )
+    await delay_queue.bind(exchange, routing_key=TIMEOUT_DELAY_ROUTING_KEY)
+
+    timeout_queue = await channel.declare_queue(TIMEOUT_QUEUE, durable=True)
+    await timeout_queue.bind(exchange, routing_key=TIMEOUT_ROUTING_KEY)
 
 
 async def publish_order_created(order_id: int, user_id: int, items: list):
@@ -87,6 +114,18 @@ async def publish_order_created(order_id: int, user_id: int, items: list):
         content_type="application/json"
     )
     await exchange.publish(message, routing_key=ROUTING_KEY)
+
+# 发超时消息：在 create_order commit 后调用
+async def publish_order_timeout(order_id: int):
+    """发超时关单消息到延迟队列"""
+    mq = await get_mq()
+    await mq.publish(
+        aio_pika.Message(
+            body=json.dumps({"order_id": order_id}).encode(),
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,   # 消息持久化
+        ),
+        routing_key=TIMEOUT_DELAY_ROUTING_KEY,
+    )
 
 
 async def close_mq():

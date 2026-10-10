@@ -24,7 +24,7 @@ from app.redis_client import redis_client
 from app.services import order_service
 from app.utils.exceptions import ConsumeStockError
 
-async def send_to_dlx(message, exc, nack_type):
+async def send_to_dlx(message, exc, nack_type, order_id):
     """发到死信队列 + 写 dlx_msg 表"""
     # 发死信队列
     exchange = await get_mq()
@@ -41,10 +41,11 @@ async def send_to_dlx(message, exc, nack_type):
     db = SessionLocal()
     try:
         db.execute(text(
-            "INSERT INTO dlx_msg (msg_id, msg_content, nack_reason, nack_type)"
-            "VALUES (:mid, :content, :reason, :type)"
+            "INSERT INTO dlx_msg (msg_id, order_id, msg_content, nack_reason, nack_type)"
+            "VALUES (:mid, :oid, :content, :reason, :type)"
         ),{
             "mid": uuid.uuid4().int % (2**63),     # bigint 主键, uuid 取模成 bigint
+            "oid": order_id,
             "content": str(message.body),
             "reason": str(exc),
             "type": nack_type,
@@ -68,7 +69,7 @@ async def handle(message):
         # 业务失败 -> 直接死信,不重试
         print(f"[consumer] 业务失败，进死信: {e}")
         db.rollback()
-        await send_to_dlx(message, e, "业务失败")
+        await send_to_dlx(message, e, "业务失败", order_id)
         await message.ack()
 
     except Exception as e:
@@ -79,7 +80,7 @@ async def handle(message):
 
         if count >= 3:
             # 重试超限 -> 死信
-            await send_to_dlx(message, e, "临时故障")
+            await send_to_dlx(message, e, "临时故障", order_id)
         else:
             # 重发到延迟队列
             exchange = await get_mq()
