@@ -1,11 +1,14 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from app.database import engine
 
 from app.routers import user as user_router
 from app.routers import product as product_router
 from app.routers import order as order_router
+from app.routers import ai
 from app.utils.exceptions import (
     InventoryNotFoundError,
     LockAcquireFailedError,
@@ -24,6 +27,7 @@ app = FastAPI(title="Order Center", version="0.1.0")
 app.include_router(user_router.router)
 app.include_router(product_router.router)
 app.include_router(order_router.router)
+app.include_router(ai.router)
 
 @app.get("/health")
 def health():
@@ -53,3 +57,15 @@ async def business_error_handler(request: Request, exc: Exception):
 @app.exception_handler(OrderForbiddenError)
 async def forbidden_handler(request: Request, exc: OrderForbiddenError):
     return JSONResponse(status_code=403, content={"code": 403, "msg": str(exc), "data": None})
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """参数校验失败: 统一 {code, msg, data} 格式，只取第一条错误"""
+    first = exc.errors()[0]
+    # loc 形如 ("body", "question"), 取最后一个字段名
+    field = first["loc"][-1]
+    msg = f"参数校验失败: {field}: {first['msg']}"
+    return JSONResponse(
+        status_code=400,
+        content={"code": 400, "msg": msg, "data": None},
+    )
