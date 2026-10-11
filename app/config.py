@@ -36,4 +36,10 @@ class Settings(BaseSettings):
     RABBITMQ_PASSWORD: str="guest"
     RABBITMQ_VHOST: str="/"
 
+    # LLM 配置
+    LLM_BASE_URL: str
+    LLM_API_KEY: str
+    LLM_MODEL: str
+    LLM_TIMEOUT: float = 30.0
+
 settings = Settings()        # 全局单例，其他文件 import settings 即可

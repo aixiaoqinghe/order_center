@@ -41,3 +41,9 @@ class LockAcquireFailedError(Exception):
 class ConsumeStockError(Exception):
     """消费者扣库存失败：库存不足或商品不存在(UPDATE 影响 0 行)"""
     pass
+
+class LLMCallError(Exception):
+    """大模型调用失败"""
+    def __init__(self, msg: str = "大模型调用失败"):
+        self.msg = msg
+        super().__init__(msg)
