@@ -1,8 +1,20 @@
 from sqlalchemy.orm import Session
 
 from app.models.order import Order
-from app.utils.exceptions import OrderNotFoundError
+from app.utils.exceptions import OrderNotFoundError, LLMCallError 
 from app.utils.llm_client import chat
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+# order_status -> 兜底话术(大模型失败时用)
+_STATUS_ANSWER = {
+    0: "当前订单尚未支付，您可确认订单后进行支付",
+    1: "当前订单已经支付成功，正在为您安排物流事项，预计后天送达",
+    2: "当前订单已经完成，是否需要售后处理",
+    3: "当前订单已经取消，是否需要为您推荐相关好物",
+}
 
 # order_status -> 中文状态名(v2)
 _STATUS_NAME = {
@@ -23,7 +35,7 @@ _SYSTEM_PROMPT = """
 """
 
 async def consult_order(db: Session, order_id: int, question: str) -> dict:
-    """AI 咨询(v2 真实调用大模型)"""
+    """AI 咨询(v3: 调大模型，失败降级返回兜底话术)"""
     order = db.query(Order).filter(Order.order_id == order_id).first()
     if order is None:
         raise OrderNotFoundError()
@@ -48,5 +60,14 @@ async def consult_order(db: Session, order_id: int, question: str) -> dict:
         {"role": "user", "content": user_prompt},
     ]
 
-    answer = await chat(messages)
+    try:
+        answer = await chat(messages)
+    except LLMCallError:
+        # 降级: 大模型失败，按订单状态返回兜底话术
+        logger.warning("LLM调用失败，降级返回兜底话术，order_id=%s", order.order_id)
+        answer = _STATUS_ANSWER.get(
+            order.order_status,
+            "抱歉，当前咨询繁忙，请稍后重试",
+        )
+
     return {"order_id": order.order_id, "answer": answer}

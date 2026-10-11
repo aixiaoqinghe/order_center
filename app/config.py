@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str
     LLM_API_KEY: str
     LLM_MODEL: str
-    LLM_TIMEOUT: float = 30.0
+    LLM_TIMEOUT_CONNECT: float = 5.0
+    LLM_TIMEOUT_READ: float = 30.0
+    LLM_TIMEOUT_WRITE: float = 10.0
+    LLM_TIMEOUT_POOL: float = 5.0
 
 settings = Settings()        # 全局单例，其他文件 import settings 即可

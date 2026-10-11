@@ -11,7 +11,12 @@ def get_llm_client() -> httpx.AsyncClient:
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(
             base_url=settings.LLM_BASE_URL,
-            timeout=settings.LLM_TIMEOUT,
+            timeout=httpx.Timeout(
+                connect=settings.LLM_TIMEOUT_CONNECT,
+                read=settings.LLM_TIMEOUT_READ,
+                write=settings.LLM_TIMEOUT_WRITE,
+                pool=settings.LLM_TIMEOUT_POOL,
+            ),
             headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
         )
     return _client
