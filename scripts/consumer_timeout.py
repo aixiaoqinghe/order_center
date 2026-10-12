@@ -19,21 +19,26 @@ async def main():
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue(TIMEOUT_QUEUE, durable=True)
 
+    print("[consumer_timeout] 启动，等待超时关单消息...")
+
     async for message in queue.iterator():
         db = SessionLocal()
         try:
             body = json.loads(message.body)
             order_id = body["order_id"]
+            print(f"[consumer_timeout] 收到消息 order_id={order_id}")
             await consume_order_timeout(db, order_id)
-            # 成功
+            print(f"[consumer_timeout] 处理完成 order_id={order_id}")
             await message.ack()
         except ConsumeStockError as e:
-            await send_to_dlx(message, str(e), "business")
-            # 业务失败 -> 进死信
+            print(f"[consumer_timeout] 业务失败: {e}")
+            await send_to_dlx(message, str(e), "business", order_id)
             await message.ack()
         except Exception as e:
-            await send_to_dlx(message, str(e), "temp")
-            # 临时故障 -> 直接死信
+            print(f"[consumer_timeout] 异常: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            await send_to_dlx(message, str(e), "temp", order_id)
             await message.ack()
         finally:
             db.close()

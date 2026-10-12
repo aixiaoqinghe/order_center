@@ -15,7 +15,6 @@ from app.services import order_service
 import asyncio
 import json
 from app.mq_client import get_connection, QUEUE_NAME
-import uuid
 import aio_pika
 from sqlalchemy import text
 from app.mq_client import get_connection, get_mq, QUEUE_NAME
@@ -41,10 +40,9 @@ async def send_to_dlx(message, exc, nack_type, order_id):
     db = SessionLocal()
     try:
         db.execute(text(
-            "INSERT INTO dlx_msg (msg_id, order_id, msg_content, nack_reason, nack_type)"
-            "VALUES (:mid, :oid, :content, :reason, :type)"
+            "INSERT INTO dlx_msg (order_id, msg_content, nack_reason, nack_type)"
+            "VALUES (:oid, :content, :reason, :type)"
         ),{
-            "mid": uuid.uuid4().int % (2**63),     # bigint 主键, uuid 取模成 bigint
             "oid": order_id,
             "content": str(message.body),
             "reason": str(exc),

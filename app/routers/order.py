@@ -31,7 +31,7 @@ def get_order_detail(
     db: Session = Depends(get_db),
 ):
     """订单详情"""
-    result = order_service.get_order_detail(db, order_id, user_id)
+    result = order_service.get_order_detail(db, user_id, order_id)
     return Response(msg="success found", data=result)
 
 @router.get("/list", response_model=Response[OrderListData])
@@ -52,5 +52,5 @@ def cancel_order(
     db: Session = Depends(get_db)
 ):
     """取消订单"""
-    result = order_service.cancel_order(db, order_id, data.user_id)
+    result = order_service.cancel_order(db, data.user_id, order_id)
     return Response(msg="success canceled", data=result)

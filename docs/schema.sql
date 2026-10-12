@@ -68,7 +68,7 @@ create table if not exists `idempotent` (
 
 -- 设计理由：死信记录表，便于人工排查原因
 create table if not exists `dlx_msg` (
-	`msg_id` bigint not null comment '消息id,主键',
+	`msg_id` bigint not null auto_increment comment '消息id,主键',
 	`order_id` bigint not null comment '订单id',
 	`msg_content` text not null comment '消息内容',
 	`nack_reason` varchar(256) not null comment '失败原因',
