@@ -84,3 +84,8 @@ class OrderCancelOut(BaseModel):
 class OrderCancelIn(BaseModel):
     """取消订单入参（body）"""
     user_id: int
+
+class OrderPayOut(BaseModel):
+    """模拟支付响应"""
+    order_id: int = Field(..., description="订单ID")
+    order_status: int = Field(..., description="订单状态")

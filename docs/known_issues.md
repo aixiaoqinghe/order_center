@@ -28,5 +28,5 @@
 | 14 | logging formatter 未验证 | Day12 | Day13 | 已解决 | "加了统一 logging 配置，验证生效，日志带级别" |
 | 15 | httpx INFO 日志噪音 | Day13 | 后续优化 | 后续优化 | "basicConfig 设了 INFO 级别，httpx 库每条请求都打日志，日志变多；真实项目会把第三方库 logger 单独调到 WARNING" |
 | 16 | LLM 失败路径未实测 | Day11 | Day13 |已解决 | "Day12 改错 key 实测通过，验证了 LLMCallError 被 catch、降级返回兜底话术" |
-| 17 | _STATUS_ANSWER 死代码 | Day11 | Day13 | 已解决 | "Day12 做降级时复用了这个字典，从死代码变成降级话术来源"
- |
+| 17 | _STATUS_ANSWER 死代码 | Day11 | Day13 | 已解决 | "Day12 做降级时复用了这个字典，从死代码变成降级话术来源" |
+| 18 | 支付无并发控制 | Day13 | 后续优化 | 后续优化 | "pay_order 裸查→判→改→commit，无 Redis 锁 / FOR UPDATE / 乐观锁 version。当前双并发结果都是 status=1 表面没问题，但真实支付要扣余额/发 MQ，会重复触发；真实项目加 FOR UPDATE 行锁或乐观锁" |

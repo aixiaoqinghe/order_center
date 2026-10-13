@@ -431,3 +431,16 @@ async def consume_order_timeout(db, order_id: int):
     )
     db.commit()
     print(f"[consume_order_timeout] order_id={order_id} 关单完成，status=3")
+
+
+def pay_order(db: Session, order_id: int) -> dict:
+    """模拟支付: 仅支付订单可支付，改状态为已支付"""
+    order = db.query(Order).filter(Order.order_id == order_id).first()
+    if order is None:
+        raise OrderNotFoundError()
+    if order.order_status != 0:
+        raise OrderStatusError("该订单状态不可支付")
+
+    order.order_status = 1
+    db.commit()
+    return {"order_id": order.order_id, "order_status": order.order_status}

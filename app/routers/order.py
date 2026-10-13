@@ -10,6 +10,7 @@ from app.schemas.order import (
     OrderCreateOut,
     OrderDetailOut,
     OrderListData,
+    OrderPayOut,
 )
 from app.services import order_service
 
@@ -54,3 +55,12 @@ def cancel_order(
     """取消订单"""
     result = order_service.cancel_order(db, data.user_id, order_id)
     return Response(msg="success canceled", data=result)
+
+@router.post("/pay/{order_id}", response_model=Response[OrderPayOut])
+def pay_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+):
+    """模拟支付接口"""
+    data = order_service.pay_order(db, order_id)
+    return Response(code=200, msg="success paid", data=data)
