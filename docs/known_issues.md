@@ -30,3 +30,4 @@
 | 16 | LLM 失败路径未实测 | Day11 | Day13 |已解决 | "Day12 改错 key 实测通过，验证了 LLMCallError 被 catch、降级返回兜底话术" |
 | 17 | _STATUS_ANSWER 死代码 | Day11 | Day13 | 已解决 | "Day12 做降级时复用了这个字典，从死代码变成降级话术来源" |
 | 18 | 支付无并发控制 | Day13 | 后续优化 | 后续优化 | "pay_order 裸查→判→改→commit，无 Redis 锁 / FOR UPDATE / 乐观锁 version。当前双并发结果都是 status=1 表面没问题，但真实支付要扣余额/发 MQ，会重复触发；真实项目加 FOR UPDATE 行锁或乐观锁" |
+| 19 | 超时关单 consumer_idempotent 判断与回滚间有理论竞态 | Day13 | 后续优化 | 后续优化 | "Day13 加 consumer_idempotent 判断 + FOR UPDATE 行锁解决了主要冲突，但判断到回滚之间仍有窗口，量级下难复现；根治要 FOR UPDATE 锁订单行做大事务" |
