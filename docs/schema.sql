@@ -42,7 +42,7 @@ create table if not exists `order` (
 	`order_status` tinyint not null default 0 comment '订单状态:0待支付 1已支付 2已完成 3已取消',
 	`order_cancel_reason` varchar(256) default null comment '取消原因',
 	primary key(`order_id`),
-	key `idx_user_id` (`user_id`)
+	key `idx_user_order` (`user_id`, `order_id`)
 )	engine = InnoDB default charset=utf8mb4;
 
 -- 设计理由：看到用户具体下单商品、下单件数
@@ -75,7 +75,8 @@ create table if not exists `dlx_msg` (
 	`nack_type` varchar(100) not null comment '失败类型',
 	`msg_createtime` datetime not null default current_timestamp comment '创建时间',
 	`msg_status` tinyint not null default 0 comment '处理状态: 0未处理 1已处理',
-	primary key (`msg_id`)
+	primary key (`msg_id`),
+	key `idx_order_status_time` (`order_id`, `msg_status`, `msg_createtime`)
 ) engine = InnoDB default charset=utf8mb4;
 
 -- 设计理由：预防消费者重复处理消息，实现消费者幂等判断
