@@ -38,16 +38,14 @@ app.include_router(ai.router)
 
 @app.get("/health")
 def health():
-    """健康检查：验证服务和 MySQL 连接"""
+    """健康检查: DB 连通返回 code=200, 不通返回 code=503"""
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return {"status": "ok", "db": "ok"}
-    except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "error", "db": "unavailable", "detail": str(e)}
-        )
+        return JSONResponse(status_code=200, content={"code": 200, "msg": "health ok", "data": {"db": "ok"}})
+    except Exception:
+        logger.exception("health check db failed")    # e 进日志，不返回
+        return JSONResponse(status_code=503, content={"code": 503, "msg": "db unavailable", "data": None})
 
 @app.exception_handler(UserAlreadyExistsError)
 @app.exception_handler(UserNotFoundError)
