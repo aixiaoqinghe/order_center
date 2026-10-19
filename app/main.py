@@ -27,6 +27,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Order Center", version="0.1.0")
 
@@ -74,4 +75,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=400,
         content={"code": 400, "msg": msg, "data": None},
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """ 兜底: 未捕获异常统一 500 + 记日志 """
+    logger.exception(
+        "未捕获异常 method=%s path=%s", 
+        request.method, request.url.path,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"code": 500, "msg": "服务器内部错误", "data": None},
     )
