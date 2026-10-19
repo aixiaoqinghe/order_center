@@ -65,14 +65,17 @@ async def forbidden_handler(request: Request, exc: OrderForbiddenError):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """参数校验失败: 统一 {code, msg, data} 格式，只取第一条错误"""
-    first = exc.errors()[0]
-    # loc 形如 ("body", "question"), 取最后一个字段名
-    field = first["loc"][-1]
-    msg = f"参数校验失败: {field}: {first['msg']}"
+    """参数校验失败: 返回全部错误, msg 一句总结, data 放明细"""
+    errors = [
+        {
+            "field": ".".join(str(x) for x in err["loc"]),
+            "msg": err["msg"],
+        }
+        for err in exc.errors()
+    ]
     return JSONResponse(
         status_code=400,
-        content={"code": 400, "msg": msg, "data": None},
+        content={"code": 400, "msg": "参数校验失败", "data": errors},
     )
 
 @app.exception_handler(Exception)

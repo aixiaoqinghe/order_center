@@ -46,4 +46,3 @@ class UserOut(BaseModel):
     def serialize_createtime(self, dt: datetime) -> str:
         # 从 ORM 拿的 dt 是 UTC 时间，转成东八区再格式化
         return dt.astimezone(CST).strftime("%Y-%m-%d %H:%M:%S")
-

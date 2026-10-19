@@ -24,9 +24,13 @@
 
 | 类型 | 触发条件 | 返回体 |
 | ---- | -------- | ------ |
-| 参数校验失败 | Pydantic Schema 校验不通过（body / query / path 参数格式错误） | {"code": 400, "msg": "参数校验失败: 字段名: 具体原因", "data": None} |
+| 参数校验失败 | Pydantic Schema 校验不通过（body / query / path 参数格式错误） | {"code": 400, "msg": "参数校验失败", "data": [{"field": "字段路径", "msg": "错误原因"}, ...]} |
 | 兜底 500 | 任何未被 handler 捕获的异常（比如 ConsumeStockError、数据库连接异常等） | {"code": 500, "msg": "服务器内部错误", "data": None} |
 
+> 脚注：field路径格式
+ - body 参数 -> body.user_name、body.items.0.product_id (嵌套数组用索引)
+ - path 参数 -> path.order_id
+ - query 参数 -> query.page
 ---
 
 ## 已确认无问题
