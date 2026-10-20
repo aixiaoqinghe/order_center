@@ -3,12 +3,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """应用配置,从 .env 读取"""
 
+    # 日志
+    LOG_LEVEL: str = "INFO"
+
     # 数据库配置
     DB_HOST: str = "127.0.0.1"
     DB_PORT: int = 3306
     DB_USER: str = "root"
     DB_PASSWORD: str
     DB_NAME: str = "order_center"
+
+    # DB 连接池
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_RECYCLE: int = 3600
+    DB_ECHO: bool = False
+
+    # 服务端口
+    API_PORT: int = 8000
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -44,5 +56,13 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_READ: float = 30.0
     LLM_TIMEOUT_WRITE: float = 10.0
     LLM_TIMEOUT_POOL: float = 5.0
+
+    # 业务弹性
+    REDIS_LOCK_TTL: int = 60
+    IDEMPOTENT_TTL_SECONDS: int = 7200
+    MQ_RETRY_TTL_MS: int = 5000
+    MQ_ORDER_TIMEOUT_MS: int = 900000
+    MQ_RETRY_MAX: int = 3
+    ALERT_LOG_PATH: str = "logs/dlx_alerts.log"
 
 settings = Settings()        # 全局单例，其他文件 import settings 即可

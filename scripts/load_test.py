@@ -18,7 +18,7 @@ from sqlalchemy import create_engine, text
 sys.path.insert(0, ".")
 from app.config import settings
 
-API_URL = "http://127.0.0.1:8000/api/order/create"
+API_URL = f"http://127.0.0.1:{settings.API_PORT}/api/order/create"
 
 engine = create_engine(settings.database_url)
 

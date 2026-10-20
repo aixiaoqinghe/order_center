@@ -12,19 +12,21 @@ from sqlalchemy import text
 
 from app.database import SessionLocal
 from app.mq_client import get_connection, DLX_QUEUE_NAME
+from app.utils.logger import setup_logging
+from app.config import settings
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("consumer_dlx")
+setup_logging("consumer_dlx.log")
+logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
-ALTER_FILE = os.path.join(LOGS_DIR, "dlx_alerts.log")
+ALERT_FILE = os.path.join(BASE_DIR, settings.ALERT_LOG_PATH)
 
 def write_alert_file(order_id, reason, nack_type):
     """追加写告警文件，失败只记日志，不抛"""
     try:
-        with open(ALTER_FILE, "a", encoding="utf-8") as f:
+        with open(ALERT_FILE, "a", encoding="utf-8") as f:
             f.write(
                 f"[{datetime.now().isoformat()}] order_id={order_id}"
                 f"nack_type={nack_type} reason={reason}\n"

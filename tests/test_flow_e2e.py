@@ -11,11 +11,17 @@ E2E 端到端测试
 """
 import time
 import uuid
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 import pytest
 
-BASE_URL = "http://localhost:8000"
+from app.config import settings
+
+BASE_URL = f"http://localhost:{settings.API_PORT}"
 
 
 def _unique_name():

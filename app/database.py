@@ -6,11 +6,11 @@ from app.config import settings
 # 1. 创建 engine（全局一个，带连接池）
 engine = create_engine(
     settings.database_url,
-    pool_size=10,          # 连接池常驻连接数
-    max_overflow=20,       # 峰值可临时增加的连接数（总数上限 = pool_size + max_overflow）
-    pool_pre_ping=True,    # 每次取连接前先 ping 一下，防止拿到失效连接
-    pool_recycle=3600,     # 连接超过 1 小时回收，防止 MySQL 主动断开
-    echo=False,            # True 会打印所有 SQL，调试用，生产关
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_pre_ping=True,
+    pool_recycle=settings.DB_POOL_RECYCLE,
+    echo=settings.DB_ECHO,
 )
 
 # 2. session 工厂：每次调用产生一个新 session

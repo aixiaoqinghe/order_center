@@ -22,11 +22,10 @@ from app.utils.exceptions import (
     UserNotFoundError,
 )
 
+from app.utils.logger import setup_logging
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Order Center", version="0.1.0")

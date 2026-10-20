@@ -64,7 +64,7 @@ async def get_mq():
             RETRY_QUEUE_NAME,
             durable=True,
             arguments={
-                "x-message-ttl": 5000,                             # 5s
+                "x-message-ttl": settings.MQ_RETRY_TTL_MS,         # 重试延迟
                 "x-dead-letter-exchange": EXCHANGE_NAME,           # 过期后回到主 exchange
                 "x-dead-letter-routing-key": ROUTING_KEY,          # 路由键变回 order.create
             },
@@ -89,7 +89,7 @@ async def _declare_timeout_queues(channel, exchange):
         TIMEOUT_DELAY_QUEUE,
         durable=True,
         arguments={
-            "x-message-ttl": 900000,
+            "x-message-ttl": settings.MQ_ORDER_TIMEOUT_MS,
             "x-dead-letter-exchange": EXCHANGE_NAME,
             "x-dead-letter-routing-key": TIMEOUT_ROUTING_KEY,
         },

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.redis_client import redis_client
 from app.database import SessionLocal
 from app.services import order_service
+from app.config import settings
 
 import asyncio
 import json
@@ -22,6 +23,11 @@ from app.database import SessionLocal
 from app.redis_client import redis_client
 from app.services import order_service
 from app.utils.exceptions import ConsumeStockError
+from app.utils.logger import setup_logging
+import logging
+
+setup_logging("consumer.log")
+logger = logging.getLogger(__name__)
 
 async def send_to_dlx(message, exc, nack_type, order_id):
     """发到死信队列 + 写 dlx_msg 表"""
@@ -65,7 +71,7 @@ async def handle(message):
     
     except ConsumeStockError as e:
         # 业务失败 -> 直接死信,不重试
-        print(f"[consumer] 业务失败，进死信: {e}")
+        logger.warning(f"业务失败，进死信: {e}")
         db.rollback()
         await send_to_dlx(message, e, "业务失败", order_id)
         await message.ack()
@@ -76,7 +82,7 @@ async def handle(message):
         headers = message.headers or {}
         count = int(headers.get("x-retry-count", 0))
 
-        if count >= 3:
+        if count >= settings.MQ_RETRY_MAX:
             # 重试超限 -> 死信
             await send_to_dlx(message, e, "临时故障", order_id)
         else:
@@ -101,7 +107,7 @@ async def main():
 
     queue = await channel.declare_queue(QUEUE_NAME, durable=True)
 
-    print("[consumer] 启动，等待消息...")
+    logger.info("启动，等待消息...")
     async with queue.iterator() as it:
         async for message in it:
             await handle(message)

@@ -27,6 +27,7 @@ from collections import defaultdict
 from app.utils.lock import acquire, release
 
 from app.mq_client import publish_order_created, publish_order_timeout
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ async def create_order(db, redis, user_id, data):
 
         result = await _do_critical_section(db, merged, user_id)
 
+        logger.info("下单成功: order_id=%s, user_id=%s", result["order_id"], user_id)
         return result
 
     except Exception:
@@ -300,7 +302,7 @@ async def consume_order(db, redis, order_id: int, items: list):
 
     # 1. 第一层幂等：Redis 幂等：抢 key, 抢不到说明已处理
     key = f"idem:order:{order_id}"
-    ok = await redis.set(key, "1", nx=True, ex=7200)   # TTL 2h
+    ok = await redis.set(key, "1", nx=True, ex=settings.IDEMPOTENT_TTL_SECONDS)
     if not ok:
         logger.warning(f"[幂等拦截] Redis hit, order_id={order_id}")
         return       # key已存在,已处理，正常返回(调用方 ack)
@@ -366,20 +368,20 @@ async def consume_order_timeout(db, order_id: int):
     - 回滚分两种：consumer_idempotent.status=1 说明消费者扣过，只回 total；
       否则完整回滚 total + locked。FOR UPDATE 锁行防竞态，升序 product_id 防死锁
     """
-    print(f"[consume_order_timeout] 开始处理 order_id={order_id}")
+    logger.info("[consume_order_timeout] 开始处理 order_id=%s", order_id)
     order = db.execute(
         text("SELECT order_status FROM `order` WHERE order_id = :oid"),
         {"oid": order_id}
     ).fetchone()
 
     if order is None:
-        print(f"[consume_order_timeout] order_id={order_id} 不存在，跳过")
+        logger.info("[consume_order_timeout] order_id=%s 不存在，跳过", order_id)
         return
 
     status = order[0]
-    print(f"[consume_order_timeout] order_id={order_id} 当前 status={status}")
+    logger.info("[consume_order_timeout] order_id=%s 当前 status=%s", order_id, status)
     if status != 0:
-        print(f"[consume_order_timeout] order_id={order_id} 已流转(status={status})，跳过")
+        logger.info("[consume_order_timeout] order_id=%s 已流转(status=%s)，跳过", order_id, status)
         return
 
     row = db.execute(
@@ -396,7 +398,7 @@ async def consume_order_timeout(db, order_id: int):
         {"oid": order_id}
     ).fetchall()
 
-    print(f"[consume_order_timeout] order_id={order_id} consumer_done={consumer_done}, {len(items)} 件商品需回滚")
+    logger.info("[consume_order_timeout] order_id=%s consumer_done=%s, %d 件商品需回滚", order_id, consumer_done, len(items))
     for item in items:
         pid, n = item[0], item[1]
 
@@ -430,7 +432,7 @@ async def consume_order_timeout(db, order_id: int):
         {"oid": order_id, "reason": "超时未支付"}
     )
     db.commit()
-    print(f"[consume_order_timeout] order_id={order_id} 关单完成，status=3")
+    logger.info("[consume_order_timeout] order_id=%s 关单完成，status=3", order_id)
 
 
 def pay_order(db: Session, order_id: int) -> dict:

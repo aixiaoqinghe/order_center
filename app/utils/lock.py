@@ -1,5 +1,6 @@
 import uuid
 from redis.asyncio import Redis
+from app.config import settings
 
 # Lua 脚本:只有 value 匹配才删除,保证“比对+删除”原子性
 # 防止:比对通过后、删除前锁过期，此时删掉的是别人的锁
@@ -11,7 +12,7 @@ else
 end
 """
 
-async  def acquire(redis: Redis, product_id: int, ttl: int = 60) -> str | None:
+async  def acquire(redis: Redis, product_id: int, ttl: int = settings.REDIS_LOCK_TTL) -> str | None:
     """
     获取单个 product_id 的分布式锁
     成功返回 value (释放时要用),失败返回 None
