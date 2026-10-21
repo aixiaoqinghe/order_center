@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from app.database import engine
 
@@ -9,6 +10,7 @@ from app.routers import user as user_router
 from app.routers import product as product_router
 from app.routers import order as order_router
 from app.routers import ai
+from app.schemas.common import ErrorResponse, Response
 from app.utils.exceptions import (
     InventoryNotFoundError,
     LockAcquireFailedError,
@@ -28,6 +30,9 @@ import logging
 setup_logging()
 logger = logging.getLogger(__name__)
 
+class HealthOut(BaseModel):
+    db: str
+
 app = FastAPI(title="Order Center", version="0.1.0")
 
 app.include_router(user_router.router)
@@ -35,16 +40,31 @@ app.include_router(product_router.router)
 app.include_router(order_router.router)
 app.include_router(ai.router)
 
-@app.get("/health")
+@app.get(
+    "/health",
+    response_model=Response[HealthOut],
+    responses={
+        503: {"model": ErrorResponse, "description": "数据库不可用"},
+    },
+)
 def health():
-    """健康检查: DB 连通返回 code=200, 不通返回 code=503"""
+    """健康检查
+
+    检查服务与数据库连通性。数据库不通返回 503，其余返回 200。
+    """
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return JSONResponse(status_code=200, content={"code": 200, "msg": "health ok", "data": {"db": "ok"}})
+        return JSONResponse(
+            status_code=200,
+            content={"code": 200, "msg": "health ok", "data": {"db": "ok"}},
+        )
     except Exception:
-        logger.exception("health check db failed")    # e 进日志，不返回
-        return JSONResponse(status_code=503, content={"code": 503, "msg": "db unavailable", "data": None})
+        logger.exception("health check db failed")
+        return JSONResponse(
+            status_code=503,
+            content={"code": 503, "msg": "db unavailable", "data": None},
+        )
 
 @app.exception_handler(UserAlreadyExistsError)
 @app.exception_handler(UserNotFoundError)

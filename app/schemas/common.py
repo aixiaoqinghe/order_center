@@ -9,3 +9,8 @@ class Response(BaseModel, Generic[T]):
     code: int = 200
     msg: str
     data: T | None = None
+
+class ErrorResponse(BaseModel):
+    code: int
+    msg: str
+    data: None = None
