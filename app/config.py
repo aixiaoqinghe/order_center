@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # 服务端口
     API_PORT: int = 8000
 
+    # JWT 配置
+    JWT_SECRET_KEY: str
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

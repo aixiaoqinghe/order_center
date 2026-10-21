@@ -96,20 +96,37 @@ DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=your_mysql_password
 DB_NAME=order_center
+DB_POOL_SIZE=10
+DB_MAX_OVERFLOW=20
+DB_POOL_RECYCLE=3600
+DB_ECHO=false
 
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
+REDIS_LOCK_TTL=60
 
 RABBITMQ_HOST=localhost
 RABBITMQ_PORT=5672
 RABBITMQ_LOGIN=guest
 RABBITMQ_PASSWORD=guest
 RABBITMQ_VHOST=/
+MQ_RETRY_TTL_MS=5000
+MQ_ORDER_TIMEOUT_MS=900000
+MQ_RETRY_MAX=3
 
 LLM_BASE_URL=https://api.deepseek.com
 LLM_API_KEY=your_deepseek_key
 LLM_MODEL=deepseek-flash
+
+JWT_SECRET_KEY=your-256-bit-secret-key-here
+JWT_ALGORITHM=HS256
+JWT_EXPIRE_MINUTES=60
+
+LOG_LEVEL=INFO
+API_PORT=8000
+IDEMPOTENT_TTL_SECONDS=7200
+ALERT_LOG_PATH=logs/dlx_alerts.log
 ```
 
 ### 数据库初始化
@@ -164,29 +181,32 @@ curl -s -X POST $BASE/api/user/register \
   -H "Content-Type: application/json" \
   -d '{"user_name":"testuser","user_password":"123456"}'
 
-# 2. 登录 (返回 user_id)
+# 2. 登录 (返回 data.token + data.user，后续要用 TOKEN)
 curl -s -X POST $BASE/api/user/login \
   -H "Content-Type: application/json" \
   -d '{"user_name":"testuser","user_password":"123456"}'
+# 把返回的 data.token 复制出来，或手动设变量:
+# TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 
-# 3. 查看商品列表
+# 3. 查看商品列表 (公开接口，无需 token)
 curl -s $BASE/api/product/list
 
 # 3.5 查某个商品的实际库存 (available_stock)
-curl -s $BASE/api/product/2        # product_id=2 当前有库存，可直接用
+curl -s $BASE/api/product/2
 
-# 4. 创建订单 (替换 USER_ID 为 Step1 返回的值；商品建议用 product_id=2)
+# 4. 创建订单 (需 token；body 只传 items，user_id 从 token 取)
 curl -s -X POST $BASE/api/order/create \
   -H "Content-Type: application/json" \
-  -d '{"user_id": USER_ID, "items":[{"product_id": 2, "order_item_num": 1}]}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"items":[{"product_id": 2, "order_item_num": 1}]}'
 
-# 5. 模拟支付 (把 ORDER_ID 替换成上一步返回的值)
-curl -s -X POST $BASE/api/order/pay/ORDER_ID
+# 5. 模拟支付 (需 token；替换 ORDER_ID 为 Step4 返回值)
+curl -s -X POST $BASE/api/order/pay/ORDER_ID \
+  -H "Authorization: Bearer $TOKEN"
 
-# 6. AI 咨询订单状态
-curl -s -X POST $BASE/api/order/consult/ORDER_ID \
-  -H "Content-Type: application/json" \
-  -d '{"question":"我的订单什么时候能送到？"}'
+# 6. AI 咨询订单状态 (需 token；question 是 Query 参数，不是 body)
+curl -s "$BASE/api/order/consult/ORDER_ID?question=我的订单什么时候能送到？" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 > 如果商品表为空，先通过以下命令创建商品和库存：
@@ -210,6 +230,34 @@ curl -s -X POST $BASE/api/order/consult/ORDER_ID \
 
 ### 3. 超时关单与消费者的竞态
 消费者先扣库存、超时关单再回滚，导致库存乱。用"查 consumer_idempotent 判断消费者状态 + FOR UPDATE 行锁"解决。详见 [anomaly_report.md](docs/anomaly_report.md)。
+
+
+## 工程化改造
+
+在功能完成基础上，对项目做企业级规范改造，每项都有“改造前 vs 改造后”。
+
+### 异常与返回体
+- 13 类自定义异常统一归属 5 个全局 handler（business 9 类→400、forbidden→403、validation→400+全字段、token_invalid→401、unhandled→500），500 兜底统一返回体、记堆栈不记敏感
+- 全接口统一 `{code, msg, data}`，/health 也统一
+
+### 参数校验
+- 校验失败返回全部错误 `data: [{field, msg}]`，字段路径全拼可定位嵌套
+
+### 日志与配置
+- 统一 logging：控制台 + `logs/app.log`、行号、毫秒；httpx 噪音降级
+- 环境相关配置全进 Settings（.env 可配），代码零硬编码
+
+### 接口文档
+- 12 接口补 description、参数描述、错误响应声明，新增 `ErrorResponse` 通用模型
+
+### 安全
+- JWT 鉴权（签发/校验），7 个接口鉴权 + 归属校验（403）
+- 身份从 token 取，不信任前端传参；`create_order` 消除 body 传 user_id 越权
+
+### 其他
+- 死信告警文件异步写（aiofiles），不阻塞事件循环
+
+
 
 ## 已知缺陷与未来优化方向
 
@@ -236,13 +284,13 @@ curl -s -X POST $BASE/api/order/consult/ORDER_ID \
 
 ### 安全与健壮性
 
-- **consult 不校验订单归属**：`/api/order/consult/{order_id}` 不校验 user_id，存在越权查询风险，应校验订单归属。
-- **全局校验 handler 只返回第一条错误**：多字段校验失败时用户一次只见一个错，可聚合全部错误字段返回。
+- ~~consult 不校验订单归属~~：已在工程化改造（JWT 鉴权）中解决，pay/consult 现校验 token 归属返回 403。
+- ~~全局校验 handler 只返回第一条错误~~：已在工程化改造（参数校验）中解决，现返回全部错误字段路径。
 
 ### 可观测性
 
-- **死信消费者同步写文件阻塞**：同步 `open(..., "a")` 在死信爆发时阻塞事件循环，可改异步写（aiofiles）或队列化。
-- **httpx INFO 日志噪音**：全局 INFO 级别下 httpx 每条请求都打日志，可将第三方库 logger 调到 WARNING。
+- ~~死信消费者同步写文件阻塞~~：已在工程化改造中解决，现用 aiofiles 异步写不阻塞事件循环。
+- ~~httpx INFO 日志噪音~~：已在工程化改造（日志系统）中解决，httpx logger 调到 WARNING。
 
 ### AI 模块
 
@@ -259,20 +307,27 @@ order_center/
 │   │   ├── inventory.py     # 库存表 (total_stock / locked_stock)
 │   │   └── order.py         # 订单 + 订单项
 │   ├── routers/             # API 路由层
-│   │   ├── user.py          # 注册 / 登录 / 查用户 (Argon2id)
-│   │   ├── product.py       # 商品列表 / 详情 / 新增
-│   │   ├── order.py         # 创建订单 / 列表 / 详情 / 取消 / 模拟支付
-│   │   └── ai.py            # AI 订单咨询 (DeepSeek + 降级兜底)
+│   │   ├── user.py          # 注册 / 登录 (JWT 出参) / info (Bearer 鉴权)
+│   │   ├── product.py       # 商品列表 / 详情 / 新增 (公开)
+│   │   ├── order.py         # create / list / detail / cancel / pay (全路由 JWT 鉴权 + 归属校验)
+│   │   └── ai.py            # consult (JWT 鉴权 + 归属校验 / DeepSeek + 降级兜底)
 │   ├── schemas/             # Pydantic 请求/响应模型
+│   │   ├── common.py        # Response{T} 统一返回体 + ErrorResponse 通用错误
+│   │   ├── user.py
+│   │   ├── product.py
+│   │   ├── order.py
+│   │   └── ai.py
 │   ├── services/            # 业务逻辑层
 │   │   ├── order_service.py # 订单核心逻辑 + MQ 消费逻辑 (扣库存 / 超时关单)
 │   │   ├── user_service.py
 │   │   ├── product_service.py
 │   │   └── ai_service.py
 │   ├── utils/               # 工具类
-│   │   ├── exceptions.py    # 自定义业务异常
-│   │   ├── lock.py          # Redis 分布式锁 (product_id 粒度, 60s TTL)
-│   │   ├── security.py      # 密码哈希与校验 (Argon2id)
+│   │   ├── exceptions.py    # 13 类自定义业务异常 (9 business → 400 / forbidden → 403 / token_invalid → 401)
+│   │   ├── deps.py          # FastAPI 依赖注入: HTTPBearer + get_current_user
+│   │   ├── lock.py          # Redis 分布式锁 (product_id 粒度, Lua 释放)
+│   │   ├── logger.py        # 统一日志 (控制台 + app.log, 行号, 毫秒, httpx→WARNING)
+│   │   ├── security.py      # 密码 Argon2id 哈希 + jose JWT 签发/校验
 │   │   └── llm_client.py    # httpx 封装 DeepSeek API
 │   ├── config.py            # 读取 .env
 │   ├── database.py          # SQLAlchemy engine + SessionLocal

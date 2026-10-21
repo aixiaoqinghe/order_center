@@ -435,11 +435,15 @@ async def consume_order_timeout(db, order_id: int):
     logger.info("[consume_order_timeout] order_id=%s 关单完成，status=3", order_id)
 
 
-def pay_order(db: Session, order_id: int) -> dict:
-    """模拟支付: 仅支付订单可支付，改状态为已支付"""
+def pay_order(db: Session, user_id: int, order_id: int) -> dict:
+    """模拟支付: 归属校验 → 仅待支付订单可支付 → 改状态为已支付"""
     order = db.query(Order).filter(Order.order_id == order_id).first()
     if order is None:
         raise OrderNotFoundError()
+
+    if order.user_id != user_id:
+        raise OrderForbiddenError("无权支付该订单")
+
     if order.order_status != 0:
         raise OrderStatusError("该订单状态不可支付")
 

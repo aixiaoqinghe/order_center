@@ -48,3 +48,8 @@ class LLMCallError(Exception):
     def __init__(self, msg: str = "大模型调用失败"):
         self.msg = msg
         super().__init__(msg)
+
+class TokenInvalidError(Exception):
+    """token 无效、格式错误或已过期"""
+    def __init__(self, msg: str = "token 无效或已过期"):
+        super().__init__(msg)

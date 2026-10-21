@@ -3,6 +3,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import aiofiles
 import asyncio
 import json
 import logging
@@ -23,16 +24,12 @@ LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
 ALERT_FILE = os.path.join(BASE_DIR, settings.ALERT_LOG_PATH)
 
-def write_alert_file(order_id, reason, nack_type):
-    """追加写告警文件，失败只记日志，不抛"""
+async def write_alert_file(line: str) -> None:
     try:
-        with open(ALERT_FILE, "a", encoding="utf-8") as f:
-            f.write(
-                f"[{datetime.now().isoformat()}] order_id={order_id}"
-                f"nack_type={nack_type} reason={reason}\n"
-            )
+        async with aiofiles.open(ALERT_FILE, "a", encoding="utf-8") as f:
+            await f.write(line)
     except Exception as e:
-        logger.error(f"写告警文件失败:{e}")
+        logger.error("写告警文件失败: %s", e)
 
 async def handle_dlx_message(db, body):
     """处理一条死信，任何异常不抛"""
@@ -62,7 +59,11 @@ async def handle_dlx_message(db, body):
     )
 
     # 写告警文件
-    write_alert_file(order_id, nack_reason, nack_type)
+    line = (
+        f"[{datetime.now().isoformat()}] order_id={order_id} "
+        f"nack_type={nack_type} reason={nack_reason}\n"
+    )
+    await write_alert_file(line)
 
     # 标记已处理
     try:

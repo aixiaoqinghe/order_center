@@ -43,27 +43,28 @@ def _check_service():
 @pytest.fixture
 def client():
     """每个测试函数一个独立的 httpx client"""
-    c = httpx.Client(timeout=10)
+    c = httpx.Client(timeout=30)
     yield c
     c.close()
 
 
 @pytest.fixture
 def user_and_order(client):
-    """helper fixture: 注册用户 + 创建订单，返回 (user_id, order_id)"""
+    """helper fixture: 注册/登录拿 token + 创建订单，返回 (token, order_id)"""
     name = _unique_name()
 
-    # 注册
-    r = client.post(
+    # 注册（撞名忽略，后面统一 login 拿 token）
+    client.post(
         f"{BASE_URL}/api/user/register",
         json={"user_name": name, "user_password": "123456"},
     )
-    if r.json()["code"] != 200:
-        r = client.post(
-            f"{BASE_URL}/api/user/login",
-            json={"user_name": name, "user_password": "123456"},
-        )
-    user_id = r.json()["data"]["user_id"]
+
+    # 无论注册成功与否，login 拿 token
+    r = client.post(
+        f"{BASE_URL}/api/user/login",
+        json={"user_name": name, "user_password": "123456"},
+    )
+    token = r.json()["data"]["token"]
 
     # 找一个有库存的商品
     products = client.get(f"{BASE_URL}/api/product/list").json()["data"]["list"]
@@ -80,14 +81,14 @@ def user_and_order(client):
     r = client.post(
         f"{BASE_URL}/api/order/create",
         json={
-            "user_id": user_id,
             "items": [{"product_id": product_id, "order_item_num": 1}],
         },
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert r.json()["code"] == 200, f"创建订单失败: {r.text}"
     order_id = r.json()["data"]["order_id"]
 
-    return user_id, order_id
+    return token, order_id
 
 
 class TestFullUserJourney:
@@ -117,7 +118,8 @@ class TestFullUserJourney:
         )
         assert r.status_code == 200, f"登录失败: {r.text}"
         assert r.json()["code"] == 200
-        assert r.json()["data"]["user_id"] == user_id
+        assert r.json()["data"]["user"]["user_id"] == user_id
+        token = r.json()["data"]["token"]
         print(f"       ✅ 登录成功")
 
         # ---- Step 3: 商品列表 ----
@@ -145,9 +147,9 @@ class TestFullUserJourney:
         r = client.post(
             f"{BASE_URL}/api/order/create",
             json={
-                "user_id": user_id,
                 "items": [{"product_id": product_id, "order_item_num": 1}],
             },
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 200, f"创建订单失败: {r.text}"
         assert r.json()["code"] == 200
@@ -163,7 +165,10 @@ class TestFullUserJourney:
 
         # ---- Step 5: 模拟支付 ----
         print(f"[5/6] 模拟支付")
-        r = client.post(f"{BASE_URL}/api/order/pay/{order_id}")
+        r = client.post(
+            f"{BASE_URL}/api/order/pay/{order_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert r.status_code == 200, f"支付失败: {r.text}"
         assert r.json()["code"] == 200
         pay_data = r.json()["data"]
@@ -174,7 +179,8 @@ class TestFullUserJourney:
         print(f"[6/6] AI 咨询订单状态")
         r = client.post(
             f"{BASE_URL}/api/order/consult/{order_id}",
-            json={"question": "我的订单什么时候能送到？"},
+            params={"question": "我的订单什么时候能送到？"},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 200, f"AI 咨询失败: {r.text}"
         assert r.json()["code"] == 200
@@ -189,41 +195,54 @@ class TestFullUserJourney:
 class TestErrorScenarios:
     """异常场景测试"""
 
-    def test_order_not_found(self, client):
+    def test_order_not_found(self, client, user_and_order):
         """查不存在的订单应返回 OrderNotFoundError"""
-        r = client.get(f"{BASE_URL}/api/order/detail/999999?user_id=1")
+        token, _ = user_and_order
+        r = client.get(
+            f"{BASE_URL}/api/order/detail/999999",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert r.status_code == 400
         assert r.json()["code"] == 400
         assert "不存在" in r.json()["msg"]
 
     def test_pay_already_paid_order_fails(self, client, user_and_order):
         """已支付的订单再支付应抛 OrderStatusError"""
-        _, order_id = user_and_order
+        token, order_id = user_and_order
 
         # 正常支付
-        r = client.post(f"{BASE_URL}/api/order/pay/{order_id}")
+        r = client.post(
+            f"{BASE_URL}/api/order/pay/{order_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert r.json()["code"] == 200
 
         # 再付一次 → 应该失败
-        r = client.post(f"{BASE_URL}/api/order/pay/{order_id}")
+        r = client.post(
+            f"{BASE_URL}/api/order/pay/{order_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert r.json()["code"] == 400
         assert "状态" in r.json()["msg"] or "不允许" in r.json()["msg"]
 
-    def test_pay_not_found_order(self, client):
+    def test_pay_not_found_order(self, client, user_and_order):
         """支付不存在的订单应返回 OrderNotFoundError"""
-        r = client.post(f"{BASE_URL}/api/order/pay/999999")
+        token, _ = user_and_order
+        r = client.post(
+            f"{BASE_URL}/api/order/pay/999999",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert r.json()["code"] == 400
         assert "不存在" in r.json()["msg"]
 
-    def test_create_order_out_of_stock(self, client):
+    def test_create_order_out_of_stock(self, client, user_and_order):
         """库存不足下单应返回 StockNotEnoughError"""
-        # product_id=1 已知库存为 0 (之前测试发现的)
-        # 如果以后产品数据变了这里可能需要调整
+        token, _ = user_and_order
         r = client.post(
             f"{BASE_URL}/api/order/create",
             json={
-                "user_id": 1,
                 "items": [{"product_id": 1, "order_item_num": 99999}],
             },
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert r.json()["code"] == 400

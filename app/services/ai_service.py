@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.models.order import Order
-from app.utils.exceptions import OrderNotFoundError, LLMCallError 
+from app.utils.exceptions import OrderForbiddenError, OrderNotFoundError, LLMCallError
 from app.utils.llm_client import chat
 
 import logging
@@ -34,11 +34,14 @@ _SYSTEM_PROMPT = """
     回答简洁，长度限制在300字内。
 """
 
-async def consult_order(db: Session, order_id: int, question: str) -> dict:
-    """AI 咨询(v3: 调大模型，失败降级返回兜底话术)"""
+async def consult_order(db: Session, user_id: int, order_id: int, question: str) -> dict:
+    """AI 咨询(v3: 归属校验 → 调大模型，失败降级返回兜底话术)"""
     order = db.query(Order).filter(Order.order_id == order_id).first()
     if order is None:
         raise OrderNotFoundError()
+
+    if order.user_id != user_id:
+        raise OrderForbiddenError("无权咨询该订单")
 
     status_name = _STATUS_NAME.get(order.order_status, "未知")
 

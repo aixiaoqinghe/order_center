@@ -10,6 +10,7 @@
 import argparse
 import asyncio
 import sys
+import time
 from collections import Counter
 
 import httpx
@@ -23,13 +24,13 @@ API_URL = f"http://127.0.0.1:{settings.API_PORT}/api/order/create"
 engine = create_engine(settings.database_url)
 
 
-async def one_request(client: httpx.AsyncClient, product_id: int, user_id: int) -> str:
+async def one_request(client: httpx.AsyncClient, token: str, product_id: int) -> str:
     payload = {
-        "user_id": user_id,
         "items": [{"product_id": product_id, "order_item_num": 1}],
     }
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        resp = await client.post(API_URL, json=payload)
+        resp = await client.post(API_URL, json=payload, headers=headers)
     except Exception as e:
         return f"其他:{type(e).__name__}"
 
@@ -45,7 +46,7 @@ async def one_request(client: httpx.AsyncClient, product_id: int, user_id: int) 
     return f"其他: HTTP{resp.status_code}({msg})"
 
 
-async def run(concurrency: int, stock: int, product_id: int, user_id: int):
+async def run(concurrency: int, stock: int, product_id: int):
     with engine.begin() as conn:
         conn.execute(
             text("UPDATE inventory SET total_stock=:s, locked_stock=0 WHERE product_id=:p"),
@@ -54,7 +55,11 @@ async def run(concurrency: int, stock: int, product_id: int, user_id: int):
 
     limits = httpx.Limits(max_connections=concurrency + 50, max_keepalive_connections=50)
     async with httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(30.0, read=60.0)) as client:
-        tasks = [one_request(client, product_id, user_id) for _ in range(concurrency)]
+        user_name = f"loadtest_{int(time.time())}"
+        token = await get_token(client, user_name, "test123456")
+        print(f"测试用户: {user_name}  token已获取")
+
+        tasks = [one_request(client, token, product_id) for _ in range(concurrency)]
         results = await asyncio.gather(*tasks)
 
     counter = Counter(results)
@@ -87,16 +92,22 @@ async def run(concurrency: int, stock: int, product_id: int, user_id: int):
     else:
         print(f">>> 🟡 全部被拒绝")
 
+async def get_token(client: httpx.AsyncClient, user_name: str, password: str) -> str:
+    base = f"http://127.0.0.1:{settings.API_PORT}"
+    # 先试注册，撞名就登录
+    await client.post(f"{base}/api/user/register", json={"user_name": user_name, "user_password": password})
+    resp = await client.post(f"{base}/api/user/login", json={"user_name": user_name, "user_password": password})
+    return resp.json()["data"]["token"]
+
 
 def main():
     parser = argparse.ArgumentParser(description="分布式锁防超卖压测")
     parser.add_argument("--concurrency", "-c", type=int, default=100, help="并发数")
     parser.add_argument("--stock", "-s", type=int, default=50, help="初始库存")
     parser.add_argument("--product-id", "-p", type=int, default=1, help="商品ID")
-    parser.add_argument("--user-id", "-u", type=int, default=1, help="下单用户ID")
     args = parser.parse_args()
 
-    asyncio.run(run(args.concurrency, args.stock, args.product_id, args.user_id))
+    asyncio.run(run(args.concurrency, args.stock, args.product_id))
 
 
 if __name__ == "__main__":

@@ -12,8 +12,7 @@ class OrderItemCreate(BaseModel):
     order_item_num: int = Field(..., ge=1, le=100)
 
 class OrderCreate(BaseModel):
-    """创建订单入参"""
-    user_id: int
+    """创建订单入参（user_id 从 token 解析，不从 body 传）"""
     items: list[OrderItemCreate]
 
 # ===== 出参 =====

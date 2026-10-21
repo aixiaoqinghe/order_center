@@ -20,6 +20,7 @@ from app.utils.exceptions import (
     PasswordError,
     ProductNotFoundError,
     StockNotEnoughError,
+    TokenInvalidError,
     UserAlreadyExistsError,
     UserNotFoundError,
 )
@@ -96,6 +97,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         status_code=400,
         content={"code": 400, "msg": "参数校验失败", "data": errors},
     )
+
+@app.exception_handler(TokenInvalidError)
+async def token_invalid_handler(request: Request, exc: TokenInvalidError):
+    logger.warning("认证失败: %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=401, content={"code": 401, "msg": "认证失败，请重新登录", "data": None})
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):

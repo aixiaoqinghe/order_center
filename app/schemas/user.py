@@ -21,12 +21,17 @@ class UserRegisterOut(BaseModel):
     user_name: str
     user_createtime: datetime
 
-class UserLoginOut(BaseModel):
-    """登录返回 data"""
+class LoginUserInfo(BaseModel):
+    """登录返回 data 里的用户信息（不含敏感字段）"""
     model_config = ConfigDict(from_attributes=True)
 
     user_id: int
     user_name: str
+
+class UserLoginOut(BaseModel):
+    """登录返回 data"""
+    token: str
+    user: LoginUserInfo
 
 # 东八区时区(固定偏移)
 CST = timezone(timedelta(hours=8))

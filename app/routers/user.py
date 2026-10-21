@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.common import Response, ErrorResponse
 from app.schemas.user import (
+    LoginUserInfo,
     UserCreate,
     UserLogin, 
     UserLoginOut,
@@ -11,6 +12,10 @@ from app.schemas.user import (
     UserRegisterOut,
 )
 from app.services import user_service
+from app.utils.deps import bearer_scheme, get_current_user
+from app.utils.security import create_access_token
+
+from app.models.user import User
 
 router = APIRouter(prefix="/api/user", tags=["user"])
 
@@ -55,27 +60,34 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
     注意：日志侧不区分用户不存在 vs 密码错误，避免用户名枚举；但返回给前端的 msg 会区分。
     """
     user = user_service.login(db, data)
-    return Response(msg="success login", data=user)
+    token = create_access_token(user.user_id)
+    return Response(
+        msg="登录成功",
+        data=UserLoginOut(
+            token=token,
+            user=LoginUserInfo.model_validate(user),
+        ),
+    )
 
 @router.get(
     "/info",
     response_model=Response[UserOut],
     responses={
-        400: {"model": ErrorResponse, "description": "用户不存在 / 参数校验失败"},
+        401: {"model": ErrorResponse, "description": "token 缺失 / 无效 / 已过期"},
         500: {"model": ErrorResponse, "description": "服务器内部错误"},
     },
+    dependencies=[Depends(bearer_scheme)],
 )
 def info(
-    user_id: int = Query(..., description="用户ID，必填", gt=0),
-    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """查询用户信息
+    """查询当前登录用户信息
 
-    根据 user_id 查询用户基本信息（不含 user_password）。
+    从 token 解析用户身份，返回该用户基本信息（不含 user_password）。
 
-    400 错误场景：
-    - user_id 未传 / <= 0（参数校验失败）
-    - 用户不存在
+    401 场景：
+    - 缺失 Authorization 头
+    - token 签名非法 / 已过期
+    - token 中的用户不存在（被删）
     """
-    user = user_service.get_user_by_id(db, user_id)
-    return Response(msg="success", data=user)
+    return Response(msg="success", data=current_user)
