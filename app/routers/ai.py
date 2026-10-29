@@ -46,6 +46,7 @@ async def consult_order(
                     "messages": [("user", f"当前订单ID: {order_id}。用户问题: {question}")],
                     "user_id": current_user.user_id
                 },
+                {"configurable": {"thread_id": f"{current_user.user_id}_{order_id}"}},
             ),
             timeout=15.0,
         )
