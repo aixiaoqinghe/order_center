@@ -8,6 +8,12 @@ from app.schemas.common import ErrorResponse, Response
 from app.services import ai_service
 from app.utils.deps import get_current_user, bearer_scheme
 
+import asyncio 
+from app.agent.agent import build_consult_agent 
+from app.agent.state import ConsultState
+
+consult_agent = build_consult_agent()     # 模块级构建一次，不要每次请求重建
+
 router = APIRouter(prefix="/api/order", tags=["AI咨询"], dependencies=[Depends(bearer_scheme)])
 
 @router.post(
@@ -32,5 +38,22 @@ async def consult_order(
     非本人订单返回 403；订单不存在返回业务错误；
     大模型调用失败时降级返回兜底文案（不抛异常）。
     """
-    data = await ai_service.consult_order(db, current_user.user_id, order_id, question)
-    return Response(code=200, msg="success consulted", data=data)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                consult_agent.invoke,
+                {
+                    "messages": [("user", f"当前订单ID: {order_id}。用户问题: {question}")],
+                    "user_id": current_user.user_id
+                },
+            ),
+            timeout=15.0,
+        )
+        answer = result["messages"][-1].content
+        if not answer or len(answer.strip()) < 3:
+            raise ValueError("Agent 返回内容过短")
+        return Response(code=200, msg="success consulted", data={"order_id": order_id, "answer": answer})
+    except Exception:
+        # 降级走旧 ai_service
+        data = await ai_service.consult_order(db, current_user.user_id, order_id, question)
+        return Response(code=200, msg="success consulted (fallback)", data=data)

@@ -2,32 +2,45 @@ from langchain_core.tools import tool
 from app.database import SessionLocal
 from app.models.order import Order, OrderItem
 from app.models.inventory import Inventory
+from typing import Annotated 
+from langgraph.prebuilt import InjectedState 
+from app.agent.agent import ConsultState    # 注意: 循环 import 风险，见下方说明
+from app.services import order_service
 
 # 注: Day6 工具直接查 ORM，不校验 user_id；Day7 接路由时升级为带 user_id 调 order_service
 # get_logistics 项目无物流表，返回固定文案，不瞎编。
 
+ORDER_STATUS_MAP = {
+    0: "待支付",
+    1: "已支付",
+    2: "已完成",
+    3: "已取消",
+}
+
 @tool
-def get_order_info(order_id: int) -> str:
+def get_order_info(order_id: int, state: Annotated[ConsultState, InjectedState]) -> str:
     """
         根据订单 ID 查询订单状态、金额、创建时间。
         当用户询问订单进度、是否发货、金额是否正确时使用。
         参数 order_id 是订单编号 (整数)。
     """
+    user_id = state["user_id"]
     db = SessionLocal()
     try:
-        order = db.query(Order).filter(Order.order_id == order_id).first()
-        if not order:
-            return f"未找到订单 {order_id}"
-        items = db.query(OrderItem).filter(OrderItem.order_id == order_id).all()
+        detail = order_service.get_order_detail(db, user_id, order_id)
+        status_text = ORDER_STATUS_MAP.get(detail["order_status"], f"未知状态({detail['order_status']})")
+        items = detail.get("items", [])
         item_desc = ";".join(
-            f"{it.product_name} x{it.order_item_num}" for it in items
+            f"{it['product_name']} x{it['order_item_num']}" for it in items 
         ) if items else "无明细"
         return (
-            f"订单{order_id}: 状态={order.order_status}, "
-            f"金额={order.order_total_amount}, "
-            f"创建时间={order.order_createtime}, "
+            f"订单{order_id}: 状态={status_text}, "
+            f"金额={detail['order_total_amount']}, "
+            f"创建时间={detail['order_createtime']}, "
             f"明细: {item_desc}"
         )
+    except Exception as e:
+        return f"查询订单失败: {e}"
     finally:
         db.close()
 
