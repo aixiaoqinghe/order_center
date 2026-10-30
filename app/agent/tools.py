@@ -39,8 +39,6 @@ def get_order_info(order_id: int, state: Annotated[ConsultState, InjectedState])
             f"创建时间={detail['order_createtime']}, "
             f"明细: {item_desc}"
         )
-    except Exception as e:
-        return f"查询订单失败: {e}"
     finally:
         db.close()
 
