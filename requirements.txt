@@ -19,5 +19,11 @@ redis~=5.0.0
 aio-pika~=10.1.0
 aiofiles~=24.0.0
 
+# Embedding
+sentence-transformers~=5.7.0
+langchain-huggingface~=1.2.0
+chromadb~=1.5.0
+langchain-chroma~=1.1.0
+
 # 测试
 pytest~=9.0.0

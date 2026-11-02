@@ -31,3 +31,6 @@ config.local.py
 .coverage
 htmlcov/
 .pytest_cache/
+
+chroma_faq/
+data/

@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from app.agent.state import ConsultState
-from app.agent.tools import get_order_info, get_inventory, get_logistics
+from app.agent.tools import get_order_info, get_inventory, get_logistics, get_orders_item, get_product_detail, search_faq
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain.agents.middleware import ToolErrorMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
@@ -21,9 +21,9 @@ def build_consult_agent():
     )
     return create_agent(
         llm,
-        [get_order_info, get_inventory, get_logistics],
+        [get_order_info, get_inventory, get_logistics, get_orders_item, get_product_detail, search_faq],
         state_schema=ConsultState,
-        system_prompt="你是订单客服。根据工具返回的信息回答用户问题。不要编造信息。",
+        system_prompt="你是订单系统的智能客服。根据工具返回的信息回答用户问题，不要编造信息。",
         checkpointer=InMemorySaver(),
         middleware=[ToolErrorMiddleware(on_tool_error)],
     )
