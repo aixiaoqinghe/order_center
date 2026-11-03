@@ -1,18 +1,27 @@
 # order_center 订单系统
 
 
-> 一句话介绍: 基于 FastAPI 的电商订单系统，含库存防超卖、MQ 异步解耦、超时关单、AI 订单咨询
+> 一句话介绍: 基于 FastAPI 的电商订单系统，含库存防超卖、MQ 异步解耦、超时关单、AI 客服 Agent (工具调用 + RAG + 记忆 + 降级)
 
 
 ## 技术栈
-FastAPI + MySQL + Redis + RabbitMQ + httpx(DeepSeek API)
+FastAPI + MySQL + Redis + RabbitMQ + httpx(DeepSeek API) + LangChain / LangGraph (Agent 编排) + Chroma (向量库) + bge-small-zh-v1.5 (embedding)
+
+
+## 技术选型
+
+- **Agent vs 固定 Workflow**: 用户问题类型不固定 (订单/库存/FAQ/物流)，固定路径覆盖不全，选 Agent 让模型自主决定调哪个工具。
+- **LangChain**: 生态成熟，`create_agent` 直接跑 ReAct 循环 (底层 LangGraph)，工具封装现成，不用自己写循环。
+- **Chroma + bge-small-zh-v1.5**: 本地零配置、中文优化、512维轻量、不用 API key，适合本地 RAG 验证。
+- **Redis 存记忆**: 项目已有 Redis，TTL 可控 (24h)，跨请求持久化，服务重启记忆不丢 (vs InMemorySaver)
+
 
 
 ## 亮点 (3-5条)
  - Redis 分布式锁（product_id 粒度，Lua 原子释放，TTL 自动过期防死锁）解决并发超卖
  - RabbitMQ 异步扣库存 + 三层幂等（Redis setnx + DB 唯一约束 + 状态判断）+ 死信兜底 + 延迟队列
  - 基于 RabbitMQ TTL + DLX 模拟延迟队列实现 15min 超时关单，避免引入延迟队列插件
- - AI 订单咨询（调 DeepSeek 大模型，httpx 异步调用，失败降级返回兜底话术）
+ - AI 客服 Agent（Tool-Calling + RAG + 记忆 + 两级降级，15s 超时兜底，零硬异常挂掉）
 
 
 ## 架构图
@@ -24,7 +33,9 @@ graph TD
         Router[router 层]
         Service[service 层]
         Model[model 层]
+        Agent[AI 客服 Agent<br>LangChain + LangGraph]
         Router --> Service
+        Router --> Agent
         Service --> Model
     end
 
@@ -32,6 +43,7 @@ graph TD
     MySQL[(MySQL)]
     RabbitMQ[(RabbitMQ)]
     DeepSeek[DeepSeek API]
+    Chroma[(Chroma 向量库)]
 
     MQConsumer[MQ消费者]
     TimeoutConsumer[超时消费者]
@@ -42,7 +54,10 @@ graph TD
     Service --> Redis
     Service --> MySQL
     Service --> RabbitMQ
-    Service --> DeepSeek
+
+    Agent --> DeepSeek
+    Agent --> Redis
+    Agent --> Chroma
 
     RabbitMQ --> MQConsumer
     RabbitMQ --> TimeoutConsumer
@@ -118,6 +133,7 @@ MQ_RETRY_MAX=3
 LLM_BASE_URL=https://api.deepseek.com
 LLM_API_KEY=your_deepseek_key
 LLM_MODEL=deepseek-flash
+LLM_TIMEOUT_READ=30
 
 JWT_SECRET_KEY=your-256-bit-secret-key-here
 JWT_ALGORITHM=HS256
@@ -136,6 +152,10 @@ mysql -u root -p < docs/schema.sql
 
 ### 启动命令
 ```bash
+# 0. (首次运行) 建 FAQ 向量索引 —— AI 客服 search_faq 工具依赖此产物
+#    产物: data/chroma/ (已 .gitignore，不进仓库；docs/faq.txt 变更后需重新跑)
+python scripts/build_faq_index.py
+
 # 1. FastAPI 服务 (主程序)
 uvicorn app.main:app --reload --port 8000
 
@@ -204,9 +224,15 @@ curl -s -X POST $BASE/api/order/create \
 curl -s -X POST $BASE/api/order/pay/ORDER_ID \
   -H "Authorization: Bearer $TOKEN"
 
-# 6. AI 咨询订单状态 (需 token；question 是 Query 参数，不是 body)
-curl -s "$BASE/api/order/consult/ORDER_ID?question=我的订单什么时候能送到？" \
+# 6. AI 咨询: 问订单物流 (Agent 会调 get_logistics + get_order_info)
+curl -s "$BASE/api/order/consult/ORDER_ID?question=我的订单什么时候能送到?" \
   -H "Authorization: Bearer $TOKEN"
+
+# 7. AI 咨询: 问平台规则 (Agent 会调 search_faq 检索 FAQ)
+curl -s "$BASE/api/order/consult/ORDER_ID?question=怎么取消订单?" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 说明: 第6、7条走Agent: 模型自主决定调 get_logistics / get_order_info / search_faq。 Agent 硬异常、超时(15s)、返回空或过短时，自动退回旧 ai_service 兜底。
 ```
 
 > 如果商品表为空，先通过以下命令创建商品和库存：
@@ -218,6 +244,50 @@ curl -s "$BASE/api/order/consult/ORDER_ID?question=我的订单什么时候能�
 
 ## 接口文档
 见 docs/api.md
+
+
+## AI 客服 Agent 章节
+
+### 从固定 Prompt 到 Tool-Calling Agent
+原实现: 查订单拼 prompt，调一次 DeepSeek，固定路径。
+现实现: LangChain `create_agent` (底层 LangGraph 循环)，模型自主决定调哪个工具、调几次。
+
+
+### 架构
+用户问题 + 历史记忆 (Redis)
+  → LLM 决定调哪个工具
+  → 执行工具 (查订单/库存/FAQ/...)
+  → 结果塞回 LLM
+  → 决定是否继续调
+  → 最终回答
+
+
+### 工具 (6个)
+| 工具 | 作用 | 
+| --- | --- |
+| get_order_info | 按订单 ID 查状态、金额、创建时间 |
+| get_inventory | 按商品 ID 查可用库存 |
+| get_logistics | 查物流(项目无物流表，返回固定文案不瞎编) |
+| get_orders_item | 查当前用户最近订单列表 |
+| get_product_detail | 按商品 ID 查价格、类型 |
+| search_faq | 从 Chroma 知识库检索 FAQ (RAG) | 
+
+
+### 能力
+- **RAG**: FAQ 存 Chroma (bge-small-zh-v1.5 embedding)，`search_faq` 检索相关条目，模型组织回答
+- **记忆**: Redis 存对话历史，`thread_id = user_id_order_id` 隔离，TTL 24小时。Agent 记忆独立用 Redis Stack (默认 6380)，与业务 Redis (6379) 隔离
+- **降级（两级兜底）**:
+  - 第一级（路由层）: Agent 硬异常 / `asyncio.wait_for` 超时 15s / `len(answer.strip()) < 3` → 退回旧 `ai_service`（固定 prompt 单轮调 LLM）
+  - 第二级（ai_service 内部）: LLM 调用失败（`LLMCallError`）→ 按订单状态返回预定义兜底文案，完全不调 LLM 也能答
+- **异常处理**: ToolErrorMiddleware 转述工具异常，Agent 不崩；recursion_limit=7 防死循环
+
+
+### 关键文件
+- `app/agent/agent.py`: create_agent 组装、RedisSaver、ToolErrorMiddleware
+- `app/agent/tools.py`: 6个工具
+- `app/agent/state.py`: ConsultState (user_id 注入)
+- `scripts/build_faq_index.py`: FAQ 建索引
+- `docs/faq.txt`: 17条 FAQ 
 
 
 ## 亮点 / 难点
@@ -292,9 +362,17 @@ curl -s "$BASE/api/order/consult/ORDER_ID?question=我的订单什么时候能�
 - ~~死信消费者同步写文件阻塞~~：已在工程化改造中解决，现用 aiofiles 异步写不阻塞事件循环。
 - ~~httpx INFO 日志噪音~~：已在工程化改造（日志系统）中解决，httpx logger 调到 WARNING。
 
-### AI 模块
+### AI 模块 (Agent)
 
-- **大模型调用为同步单次响应**：httpx 单次请求等完整回复，长回答等待久、无上下文记忆，可优化流式输出（SSE）与会话历史。
+- ~~大模型调用为同步单次响应、无上下文记忆~~: 阶段5 已升级为 Tool-Calling Agent，Redis 存对话历史 (thread_id = user_id_order_id, TTL 24h)，支持多轮上下文。
+- **单 Agent 串行调用**: 模型一次调一个工具，多工具场景串行等待，可优化为并行工具调用。
+- **记忆 TTL 24h 到期即丢**: 设计如此(客服场景当天追问为主)，非 bug；如需长期记忆需引入 Store 层。
+- **无正式评估指标**: 目前只有 8 个问题的轻评估(人眼看工具调用和回答)，无 faithfulness / answer relevance 等量化指标。
+- **无多 Agent 协作**: 单 Agent 编排，未做 Supervisor / 订单 Agent / 售后 Agent 分工。
+- **无 Human-in-the-loop**: 高风险操作 (如退款) 未接人工审批。
+- **无可观测性**: 未接 LangSmith tracing，Agent 每步决策不可视。
+
+
 
 ## 项目结构
 
@@ -310,7 +388,7 @@ order_center/
 │   │   ├── user.py          # 注册 / 登录 (JWT 出参) / info (Bearer 鉴权)
 │   │   ├── product.py       # 商品列表 / 详情 / 新增 (公开)
 │   │   ├── order.py         # create / list / detail / cancel / pay (全路由 JWT 鉴权 + 归属校验)
-│   │   └── ai.py            # consult (JWT 鉴权 + 归属校验 / DeepSeek + 降级兜底)
+│   │   └── ai.py            # consult (JWT 鉴权 + 归属校验 / Agent + 旧 ai_service 降级)
 │   ├── schemas/             # Pydantic 请求/响应模型
 │   │   ├── common.py        # Response{T} 统一返回体 + ErrorResponse 通用错误
 │   │   ├── user.py
@@ -321,7 +399,7 @@ order_center/
 │   │   ├── order_service.py # 订单核心逻辑 + MQ 消费逻辑 (扣库存 / 超时关单)
 │   │   ├── user_service.py
 │   │   ├── product_service.py
-│   │   └── ai_service.py
+│   │   └── ai_service.py    # 旧 consult (Agent 降级时兜底)
 │   ├── utils/               # 工具类
 │   │   ├── exceptions.py    # 13 类自定义业务异常 (9 business → 400 / forbidden → 403 / token_invalid → 401)
 │   │   ├── deps.py          # FastAPI 依赖注入: HTTPBearer + get_current_user
@@ -329,6 +407,10 @@ order_center/
 │   │   ├── logger.py        # 统一日志 (控制台 + app.log, 行号, 毫秒, httpx→WARNING)
 │   │   ├── security.py      # 密码 Argon2id 哈希 + jose JWT 签发/校验
 │   │   └── llm_client.py    # httpx 封装 DeepSeek API
+│   ├── agent/               # AI 客服 Agent (LangChain + LangGraph)
+│   │   ├── agent.py         # create_agent 组装、RedisSaver、ToolErrorMiddleware
+│   │   ├── tools.py         # 6个工具 (@tool 装饰)
+│   │   └── state.py         # ConsultState (user_id 注入)
 │   ├── config.py            # 读取 .env
 │   ├── database.py          # SQLAlchemy engine + SessionLocal
 │   ├── mq_client.py         # RabbitMQ 连接 / 队列 / 交换机初始化
@@ -339,7 +421,9 @@ order_center/
 │   ├── consumer_timeout.py  # 15min 延迟队列 → 超时关单 + 回滚库存
 │   ├── consumer_dlx.py      # 死信队列 → 写 dlx_msg 表
 │   ├── load_test.py         # 压测脚本
-│   └── mq_dup_test.py       # MQ 幂等重复投递测试
+│   ├── mq_dup_test.py       # MQ 幂等重复投递测试
+│   ├── build_faq_index.py   # FAQ 建 Chroma 索引 (离线跑一次)
+│   └── test_day11_faq.py    # search_faq 检索验证
 ├── tests/                   # E2E 自动化测试 (pytest + httpx)
 │   └── test_flow_e2e.py     # 5 个用例: 完整链路 + 4 个异常场景
 ├── docs/
@@ -349,7 +433,9 @@ order_center/
 │   ├── known_issues.md      # 已知问题台账
 │   ├── anomaly_report.md    # Day6-Day9 异常报告 (历史冻结)
 │   ├── project_requirements.md
-│   └── risks.md
+│   ├── risks.md
+│   ├── faq.txt               # 17 条客服 FAQ (RAG 知识库)
+│   └── stage5_day13_interview_talk.md   # 阶段5 面试话术
 ├── .env.example
 ├── requirements.txt
 └── README.md

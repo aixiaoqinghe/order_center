@@ -4,7 +4,6 @@ from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from app.agent.state import ConsultState
 from app.agent.tools import get_order_info, get_inventory, get_logistics, get_orders_item, get_product_detail, search_faq
-from langgraph.checkpoint.memory import InMemorySaver
 from langchain.agents.middleware import ToolErrorMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
 from langgraph.checkpoint.redis import RedisSaver 
