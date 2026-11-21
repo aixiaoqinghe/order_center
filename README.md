@@ -73,6 +73,7 @@ graph TD
 详细时序图见 [docs/flow.md](docs/flow.md)，包含：
 
 - 创建订单流程（加锁 → 锁库存 → 写订单 → 发 MQ → 消费者扣库存）
+- 关单与库存回滚流程（手动取消 / 15min 超时：订单行锁 FOR UPDATE 串行化 + consumer_idempotent.consume_status 判断 MQ 状态 + 分分支回滚 total/locked）
 - 消费者重试与死信流程（临时故障重试 3 次 → 超限进死信队列）
 
 
@@ -299,7 +300,7 @@ curl -s "$BASE/api/order/consult/ORDER_ID?question=怎么取消订单?" \
 模拟重复消费导致重复扣库存。用三层幂等解决：Redis setnx（快）+ DB 唯一约束（可靠）+ status 状态判断（兜底）。详见 [anomaly_report.md](docs/anomaly_report.md)。
 
 ### 3. 超时关单与消费者的竞态
-消费者先扣库存、超时关单再回滚，导致库存乱。用"查 consumer_idempotent 判断消费者状态 + FOR UPDATE 行锁"解决。详见 [anomaly_report.md](docs/anomaly_report.md)。
+下单只预占 `locked_stock += n`（`total_stock` 不动），MQ 扣库存才减 total，并与 `consume_status=1` 同事务提交。关单与扣库存都先抢同一行订单的 `FOR UPDATE` 行锁，覆盖"判断 → 改库存 → 改订单状态"全过程，再按 `product_id` 升序拿库存行锁防死锁；`consumer_idempotent.consume_status` 只用来决定回滚哪部分：`status=1` 只补 `total`，否则只释放 `locked`，total 一分不动。详见 [anomaly_report.md](docs/anomaly_report.md)。
 
 
 ## 工程化改造
@@ -336,7 +337,8 @@ curl -s "$BASE/api/order/consult/ORDER_ID?question=怎么取消订单?" \
 ### 并发与一致性
 
 - **分布式锁为单点模式**：`SET NX PX` 单 Redis 实例加锁，宕机时锁失效，可升级 Redlock 或多节点锁（etcd）。
-- **扣库存/回滚不幂等**：`UPDATE total = total - n` 重复执行会重复扣，消息重投或超时回滚时数据不一致，根治需扣减可重入（记录扣减流水）。
+- **扣减模型没有流水**：行为幂等已由**订单行锁串行化** + 三层幂等（Redis `SET NX EX` / 占位唯一约束 / `consume_status` 状态判断）保证，重复消息与重复关单都不会重复改库存；真要可重入仍需记录每条消息的扣减流水。
+- **`rowcount=0` 会静默错账**：扣库存 UPDATE 影响 0 行时只打 warning、仍置 `status=1` 并 ACK，关单会按"已扣过"只补 total，导致 total 虚增、`locked` 永久悬空，三条幂等路径都无法再清理，只能人工改库。这是明确保留的边界，不是设计选择。
 - **支付无并发控制**：`pay_order` 裸查改，真实支付场景双并发会重复触发，需 `FOR UPDATE` 行锁或乐观锁 version。
 - **锁冲突不重试**：抢不到锁即返回 400，高并发下成功数低于库存数，可加自旋/等待重试。
 
@@ -346,25 +348,13 @@ curl -s "$BASE/api/order/consult/ORDER_ID?question=怎么取消订单?" \
 - **重试无上限阈值 / 死信归档缺失**：临时故障重试 3 次后进死信，次数硬编码，死信只落表无归档策略，可做阈值可配 + 定期归档。
 - **死信查不到记录直接 ACK**：查 `dlx_msg` 失败时告警后 ACK，消息会彻底丢失，应改为不 ACK 转兜底队列。
 - **一条 order_id 多条死信只标一条**：`LIMIT 1` 只标记最新一条，多条未处理死信会漏标，应按 `msg_id` 精确标记。
-- **超时关单与消费者存在理论竞态**：Day13 已加 `consumer_idempotent` 判断 + `FOR UPDATE` 行锁解决主要冲突，但判断到回滚之间仍有窗口，根治需锁订单行做大事务。
 
 ### 架构
 
 - **同步 DB + 异步外壳矛盾**：FastAPI async 接口内用同步 SQLAlchemy，阻塞事件循环，200 并发打崩连接池，彻底解决需换 asyncpg 或同步操作丢线程池，调大连接池仅治标。
 
-### 安全与健壮性
-
-- ~~consult 不校验订单归属~~：已在工程化改造（JWT 鉴权）中解决，pay/consult 现校验 token 归属返回 403。
-- ~~全局校验 handler 只返回第一条错误~~：已在工程化改造（参数校验）中解决，现返回全部错误字段路径。
-
-### 可观测性
-
-- ~~死信消费者同步写文件阻塞~~：已在工程化改造中解决，现用 aiofiles 异步写不阻塞事件循环。
-- ~~httpx INFO 日志噪音~~：已在工程化改造（日志系统）中解决，httpx logger 调到 WARNING。
-
 ### AI 模块 (Agent)
 
-- ~~大模型调用为同步单次响应、无上下文记忆~~: 阶段5 已升级为 Tool-Calling Agent，Redis 存对话历史 (thread_id = user_id_order_id, TTL 24h)，支持多轮上下文。
 - **单 Agent 串行调用**: 模型一次调一个工具，多工具场景串行等待，可优化为并行工具调用。
 - **记忆 TTL 24h 到期即丢**: 设计如此(客服场景当天追问为主)，非 bug；如需长期记忆需引入 Store 层。
 - **无正式评估指标**: 目前只有 8 个问题的轻评估(人眼看工具调用和回答)，无 faithfulness / answer relevance 等量化指标。

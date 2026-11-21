@@ -1,22 +1,25 @@
 ## 异常清单
 
+> 行号已按 2026-11-19 修复后的 `order_service.py`（475 行）重标。`ConsumeStockError` 已停用：全仓无 `raise`，仅保留异常类定义与 `consumer*.py` 的 catch 兼容。
+
 | 类名 | 触发点 (文件:行) | 归属handler | 返回码 |
 |------|-----------------|-------------|--------|
-| UserAlreadyExistsError | user_service.py:27 | business_error_handler(现状=目标) | 400 |
-| UserNotFoundError | user_service.py:20, order_service.py:200 | business_error_handler(现状=目标) | 400 |
-| PasswordError | user_service.py:52, user_service.py:55 | business_error_handler(现状=目标) | 400 |
-| ProductNotFoundError | product_service.py:13, order_service.py:127 | business_error_handler(现状=目标) | 400 |
-| InventoryNotFoundError | order_service.py:45, order_service.py:261 | business_error_handler(现状=目标) | 400 |
-| StockNotEnoughError | order_service.py:47 | business_error_handler(现状=目标) | 400 |
-| OrderNotFoundError | order_service.py:170, order_service.py:236, order_service.py:440, ai_service.py:41 | business_error_handler(现状=目标) | 400 |
-| OrderForbiddenError | order_service.py:173, order_service.py:239 | forbidden_handler(现状=目标) | 403 |
-| OrderStatusError | order_service.py:242, order_service.py:442 | business_error_handler(现状=目标) | 400 |
-| LockAcquireFailedError | order_service.py:146 | business_error_handler(现状=目标) | 400 |
-| ConsumeStockError | order_service.py:350, order_service.py:423 | 500兜底 | 500 |
+| UserAlreadyExistsError | user_service.py:33 | business_error_handler(现状=目标) | 400 |
+| UserNotFoundError | user_service.py:24, user_service.py:60, order_service.py:202 | business_error_handler(现状=目标) | 400 |
+| PasswordError | user_service.py:64 | business_error_handler(现状=目标) | 400 |
+| ProductNotFoundError | product_service.py:17, order_service.py:128 | business_error_handler(现状=目标) | 400 |
+| InventoryNotFoundError | order_service.py:46, order_service.py:277, product_service.py:21 | business_error_handler(现状=目标) | 400 |
+| StockNotEnoughError | order_service.py:48 | business_error_handler(现状=目标) | 400 |
+| OrderNotFoundError | order_service.py:172, order_service.py:244, order_service.py:465, ai_service.py:41 | business_error_handler(现状=目标) | 400 |
+| OrderForbiddenError | order_service.py:175, order_service.py:247, order_service.py:468, ai_service.py:44 | forbidden_handler(现状=目标) | 403 |
+| OrderStatusError | order_service.py:250, order_service.py:471 | business_error_handler(现状=目标) | 400 |
+| LockAcquireFailedError | order_service.py:147 | business_error_handler(现状=目标) | 400 |
+| ConsumeStockError | 已废弃（无触发点） | 曾归 500 兜底 | 不再产生 |
 | LLMCallError | llm_client.py:37, llm_client.py:39, llm_client.py:41, llm_client.py:48 | 无(被 ai_service 降级吞掉) | 不产生（被 ai_service 降级吞掉，正常走 200 返回兜底话术）|
 
 
 ## 改造前后对比
+> 下表是 Day18 当时的改造记录，`ConsumeStockError` 相关表述属历史时点，现行已停用。
 | 项 | 改造前 | 改造后 | 
 | ------ | ------ | ------ |
 | 自定义异常类覆盖 | 12 类中 10 类有 handler，ConsumeStockError/LLMCallError 漏网 | 12 类全部明确归属（ConsumeStockError 500 兜底；LLMCallError 被 ai_service 吞，不冒 handler） |

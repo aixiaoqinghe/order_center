@@ -5,6 +5,7 @@
 > 范围：`app/routers/`、`app/services/`、`scripts/` 中所有 SELECT 查询
 > 统计标准：ORM `.query()` / `.filter()` / `.filter_by()`、裸 SQL `text()`
 > `app/routers/` 无直接查询（全调 service 层），`app/main.py` 不在范围内
+> **2026-11-19 修订**：`order_service.py` 三个函数重写后行号已重标；新增 3 处订单行锁（`with_for_update()` / `SELECT ... FROM \`order\` ... FOR UPDATE`）。订单行锁是关单与扣库存串行化的核心，库存行 `FOR UPDATE` 只是第二层。
 
 ---
 
@@ -30,18 +31,18 @@
 
 | # | 行号 | 用途 | ORM 语句 | 等价 SQL |
 |---|------|------|----------|----------|
-| 7 | :43 | 创建订单时查库存 | `db.query(Inventory).filter_by(product_id=pid).first()` | `SELECT * FROM inventory WHERE product_id = ? LIMIT 1` |
-| 8 | :92 | 按 order_id 查订单详情 | `db.query(Order).filter(Order.order_id == order_id).first()` | `SELECT * FROM \`order\` WHERE order_id = ? LIMIT 1` |
-| 9 | :94 | 查订单的所有商品项 | `db.query(OrderItem).filter(OrderItem.order_id == order_id).all()` | `SELECT * FROM order_item WHERE order_id = ?` |
-| 10 | :125 | 支付时按 product_id 查商品 | `db.query(Product).filter_by(product_id=item.product_id).first()` | `SELECT * FROM product WHERE product_id = ? LIMIT 1` |
-| 11 | :168 | 按 order_id 查订单（支付回调） | `db.query(Order).filter(Order.order_id == order_id).first()` | `SELECT * FROM \`order\` WHERE order_id = ? LIMIT 1` |
-| 12 | :175 | 查订单商品项（支付回调） | `db.query(OrderItem).filter(OrderItem.order_id == order_id).all()` | `SELECT * FROM order_item WHERE order_id = ?` |
-| 13 | :198 | 查 user（订单列表分页前校验） | `db.query(User).filter(User.user_id == user_id).first()` | `SELECT * FROM user WHERE user_id = ? LIMIT 1` |
-| 14 | :202 | 订单总数（分页用） | `db.query(Order).filter(Order.user_id == user_id).count()` | `SELECT COUNT(*) FROM \`order\` WHERE user_id = ?` |
-| 15 | :204-209 | 订单分页列表 | `db.query(Order).filter(Order.user_id == user_id).order_by(Order.order_id.desc()).offset(offset).limit(size).all()` | `SELECT * FROM \`order\` WHERE user_id = ? ORDER BY order_id DESC LIMIT ? OFFSET ?` |
-| 16 | :234 | 取消订单时查订单 | `db.query(Order).filter(Order.order_id == order_id).first()` | `SELECT * FROM \`order\` WHERE order_id = ? LIMIT 1` |
-| 17 | :243-248 | 取消订单时查商品项（升序防死锁） | `db.query(OrderItem).filter(OrderItem.order_id == order_id).order_by(OrderItem.product_id.asc()).all()` | `SELECT * FROM order_item WHERE order_id = ? ORDER BY product_id ASC` |
-| 18 | :438 | 手动关单时查订单 | `db.query(Order).filter(Order.order_id == order_id).first()` | `SELECT * FROM \`order\` WHERE order_id = ? LIMIT 1` |
+| 7 | :44 | 创建订单时查库存 | `db.query(Inventory).filter_by(product_id=pid).first()` | `SELECT * FROM inventory WHERE product_id = ? LIMIT 1` |
+| 8 | :93 | 按 order_id 查订单详情 | `db.query(Order).filter(Order.order_id == order_id).first()` | `SELECT * FROM \`order\` WHERE order_id = ? LIMIT 1` |
+| 9 | :95 | 查订单的所有商品项 | `db.query(OrderItem).filter(OrderItem.order_id == order_id).all()` | `SELECT * FROM order_item WHERE order_id = ?` |
+| 10 | :126 | 支付时按 product_id 查商品 | `db.query(Product).filter_by(product_id=item.product_id).first()` | `SELECT * FROM product WHERE product_id = ? LIMIT 1` |
+| 11 | :170 | 按 order_id 查订单（支付回调） | `db.query(Order).filter(Order.order_id == order_id).first()` | `SELECT * FROM \`order\` WHERE order_id = ? LIMIT 1` |
+| 12 | :177 | 查订单商品项（支付回调） | `db.query(OrderItem).filter(OrderItem.order_id == order_id).all()` | `SELECT * FROM order_item WHERE order_id = ?` |
+| 13 | :200 | 查 user（订单列表分页前校验） | `db.query(User).filter(User.user_id == user_id).first()` | `SELECT * FROM user WHERE user_id = ? LIMIT 1` |
+| 14 | :204 | 订单总数（分页用） | `db.query(Order).filter(Order.user_id == user_id).count()` | `SELECT COUNT(*) FROM \`order\` WHERE user_id = ?` |
+| 15 | :207-212 | 订单分页列表 | `db.query(Order).filter(Order.user_id == user_id).order_by(Order.order_id.desc()).offset(offset).limit(size).all()` | `SELECT * FROM \`order\` WHERE user_id = ? ORDER BY order_id DESC LIMIT ? OFFSET ?` |
+| 16 | :237-242 | 取消订单时查订单并**订单行锁** | ``db.query(Order).filter(...).with_for_update().first()`` | ``SELECT ... FROM `order` ... FOR UPDATE`` |
+| 17 | :260-264 | 取消订单时查商品项（升序防死锁） | `db.query(OrderItem).filter(OrderItem.order_id == order_id).order_by(OrderItem.product_id.asc()).all()` | `SELECT * FROM order_item WHERE order_id = ? ORDER BY product_id ASC` |
+| 18 | 已移除 | 手动关单时查订单 | 改由 :401 原生 SQL + FOR UPDATE 实现（订单行锁），不再用 ORM 裸查 | 同左 |
 
 #### app/services/ai_service.py
 
@@ -57,12 +58,17 @@
 
 | # | 行号 | 用途 | 完整 SQL |
 |---|------|------|----------|
-| 20 | :251-257 | 取消订单 — 查库存并**行锁** | `SELECT total_stock, locked_stock FROM inventory WHERE product_id = :pid FOR UPDATE` |
-| 21 | :311-314 | 消费者幂等 — 查 consumer_idempotent 状态 | `SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid` |
-| 22 | :370-373 | 超时关单 — 查订单状态 | `SELECT order_status FROM \`order\` WHERE order_id = :oid` |
-| 23 | :385-388 | 超时关单 — 查消费者幂等记录 | `SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid` |
-| 24 | :391-397 | 超时关单 — 查订单商品项（升序防死锁） | `SELECT product_id, order_item_num FROM order_item WHERE order_id = :oid ORDER BY product_id ASC` |
-| 25 | :403-406 | 超时关单 — 查库存并**行锁** | `SELECT * FROM inventory WHERE product_id = :pid FOR UPDATE` |
+| 20 | :269-272 | 取消订单 — 查库存并**行锁** | `SELECT total_stock, locked_stock FROM inventory WHERE product_id = :pid FOR UPDATE` |
+| 21 | :320-322 | 消费者幂等 — 查 consumer_idempotent 状态 | `SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid` |
+| 22 | :401-403 | 超时关单 — 查订单状态并**订单行锁** | ``SELECT order_status FROM `order` WHERE order_id = :oid FOR UPDATE`` |
+| 23 | :416-418 | 超时关单 — 查消费者幂等记录 | `SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid` |
+| 24 | :422-427 | 超时关单 — 查订单商品项（升序防死锁） | `SELECT product_id, order_item_num FROM order_item WHERE order_id = :oid ORDER BY product_id ASC` |
+| 25 | :433-435 | 超时关单 — 查库存并**行锁** | `SELECT * FROM inventory WHERE product_id = :pid FOR UPDATE` |
+| 补1 | :237-242 | 取消订单 — **订单行锁**（ORM with_for_update） | ``SELECT * FROM `order` WHERE order_id = :oid FOR UPDATE`` |
+| 补2 | :349-352 | 消费者扣库存 — **订单行锁** | ``SELECT order_status FROM `order` WHERE order_id = :oid FOR UPDATE`` |
+| 补3 | :253-256 / :416-418 | 关单 — 查 consumer_idempotent 状态 | ``SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid`` |
+
+> 补1~补3 为 2026-11-19 新增，沿用「补N」不占原编号，下方 #26 / #27 及 EXPLAIN 表引用不变。
 
 #### scripts/consumer_dlx.py
 

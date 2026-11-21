@@ -18,7 +18,7 @@
  2. 消费者ACK丢失,订单处理了,但是回到队列等待下次消费
  3. MQ 重启后,订单重复消费
 - **应对方案**
- 1. DB 唯一约束 + 状态判断(订单状态是“已处理”就跳过)
+ 1. DB 唯一约束 + 消费状态判断(`consume_status=1` 已处理则跳过；`order_status=3` 已取消则跳过扣库存。order 状态为 0待支付/1已支付/2已完成/3已取消，没有"已处理"值)
  2. Redis set nx 命令,确保每个订单只能被消费一次,要设置过期时间
 
 
@@ -121,3 +121,19 @@
  1. 死信表插入失败时,降级记日志文件
  2. 告警
  3. DB 恢复后,从日志文件补录
+
+
+### 12.关单与 MQ 消费者库存回滚竞态
+- **风险描述**
+ 关单先于 MQ 消费者执行时，旧代码会错误地把 total_stock 也加回去（下单只动了 locked_stock，total 从来没被减过），导致库存凭空多出；同时 MQ 消费者因 locked_stock 已被释放，UPDATE 的 `WHERE locked_stock >= n` 不满足 → `rowcount=0` → 抛 `ConsumeStockError` → 调用方直接发死信并 ACK，扣库存不再执行
+- **触发场景**
+ 1. MQ 延迟/积压，超时关单或手动取消先执行（旧代码只锁 inventory 行，没有订单行锁，两个入口可以并发）
+ 2. 旧关单分支写 `total_stock += n` 且 `locked_stock -= n`，凭空加 total
+- **应对方案（现行实现）**
+ 1. 关单和 MQ 消费者都拿订单行锁 FOR UPDATE，强制串行化，不可能同时跑
+ 2. 关单用 `consumer_idempotent.consume_status` 判断 MQ 状态（订单级可靠信号，与扣库存在同一事务提交）
+ 3. MQ 未消费（`consume_status != 1`）→ 只释放 `locked_stock`，不加 `total_stock`（total 从未被减过，不用补）
+ 4. MQ 已消费（`consume_status = 1`）→ 只补回 `total_stock`（locked 已随扣减清零）
+ 5. MQ 消费者拿锁后查 `order_status=3`（已关单）则跳过扣库存，置 `consume_status=1` 并 ACK，不再扣库存、不重投
+- **状态**
+ 上述两个问题（关单凭空多 total + MQ 扣不到库存后消息进死信、扣减不再执行）已修复。另有明确保留的边界：`rowcount=0` 时库存没扣但仍置 `consume_status=1`，关单会按「已扣过」只补 total，导致 total 虚增、locked 永久悬空；现已补 `logger.warning` 可观测，但错账仍在（见 README「已知缺陷」）

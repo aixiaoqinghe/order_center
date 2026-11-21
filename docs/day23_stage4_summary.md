@@ -1,4 +1,7 @@
 ## 改造前 vs 改造后总表 (Day15-23)
+
+> 下表是 Day15-23 当时的改造记录。注：`ConsumeStockError` 已在 2026-11-19 库存回滚回归修复后停用（全仓无 `raise`，仅保留异常类与调用方 catch 兼容），下表相关表述属 Day18 时点。
+
 | Day | 改造项 | 改造前 | 改造后 | 
 | --- | ------ | ------ | ----- |
 | 15-17 | MySQL 索引 | ① order 表 idx_user_id 单列：rows=665(表672)，选择性差；② dlx_msg 无索引，type=ALL 全表扫 + Using filesort | ① order 建联合索引 idx_user_order(user_id, order_id)，删单列 idx_user_id，COUNT 覆盖 + 列表免 filesort；② dlx_msg 建联合索引 idx_order_status_time(order_id, msg_status, msg_createtime)，ALL→ref，filesort 消除 |

@@ -82,7 +82,7 @@ create table if not exists `dlx_msg` (
 -- 设计理由：预防消费者重复处理消息，实现消费者幂等判断
 create table if not exists `consumer_idempotent`(
 	`order_id` bigint not null comment '订单id,主键',
-	`consume_status` tinyint not null comment '消费状态:0处理中 1成功 2失败',
+	`consume_status` tinyint not null comment '消费状态:0处理中 1已处理(扣减成功或跳过扣库存) 2失败',
 	`consume_createtime` datetime not null default current_timestamp comment '消费时间',
 	`result_msg` text not null comment '下单返回消息',
 	primary key(`order_id`)

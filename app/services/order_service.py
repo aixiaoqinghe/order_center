@@ -231,9 +231,15 @@ def get_order_list(db: Session, user_id: int, page: int, size: int) -> dict:
     }
 
 def cancel_order(db: Session, user_id: int, order_id: int) -> dict:
-    """取消订单：校验状态 -> FOR UPDATE 锁行看 locked 真实值 -> 回滚库存 -> 改 status/reason"""
+    """取消订单：订单行锁串行化 -> 查 consumer_idempotent 判断 MQ 是否扣过 -> 按规则回滚"""
     try:
-        order = db.query(Order).filter(Order.order_id == order_id).first()
+        # 订单行锁:覆盖"判断 + 改库存 + 改订单状态"全过程,与 consume_order 互斥
+        order = (
+            db.query(Order)
+            .filter(Order.order_id == order_id)
+            .with_for_update()
+            .first()
+        )
         if order is None:
             raise OrderNotFoundError(f"订单不存在:{order_id}")
 
@@ -243,6 +249,13 @@ def cancel_order(db: Session, user_id: int, order_id: int) -> dict:
         if order.order_status != 0:
             raise OrderStatusError(f"订单当前状态不允许取消:{order.order_status}")
 
+        # status=1 与扣库存在同一事务提交,是订单级可靠信号;不能用商品级 locked_stock 判断
+        ci = db.execute(
+            text("SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid"),
+            {"oid": order_id},
+        ).fetchone()
+        consumer_done = ci is not None and ci[0] == 1
+
         items = (
             db.query(OrderItem)
             .filter(OrderItem.order_id == order_id)
@@ -251,34 +264,28 @@ def cancel_order(db: Session, user_id: int, order_id: int) -> dict:
         )
 
         for it in items:
+            pid, n = it.product_id, it.order_item_num
             row = db.execute(
                 text(
                     "SELECT total_stock, locked_stock FROM inventory "
                     "WHERE product_id = :pid FOR UPDATE"
                 ),
-                {"pid": it.product_id},
+                {"pid": pid},
             ).fetchone()
 
             if row is None:
-                raise InventoryNotFoundError(f"库存记录不存在: {it.product_id}")
+                raise InventoryNotFoundError(f"库存记录不存在: {pid}")
 
-            locked = row[1]
-            if locked >= it.order_item_num:
+            # MQ 扣过:total 已减过,只回补 total;没扣过:只释放 locked,total 从没动过
+            if consumer_done:
                 db.execute(
-                    text(
-                        "UPDATE inventory SET total_stock = total_stock + :n, "
-                        "locked_stock = locked_stock - :n "
-                        "WHERE product_id = :pid"
-                    ),
-                    {"n": it.order_item_num, "pid": it.product_id},
+                    text("UPDATE inventory SET total_stock = total_stock + :n WHERE product_id = :pid"),
+                    {"n": n, "pid": pid},
                 )
             else:
                 db.execute(
-                    text(
-                        "UPDATE inventory SET total_stock = total_stock + :n "
-                        "WHERE product_id = :pid"
-                    ),
-                    {"n": it.order_item_num, "pid": it.product_id},
+                    text("UPDATE inventory SET locked_stock = locked_stock - :n WHERE product_id = :pid"),
+                    {"n": n, "pid": pid},
                 )
 
         order.order_status = 3
@@ -298,18 +305,17 @@ def cancel_order(db: Session, user_id: int, order_id: int) -> dict:
     }
 
 async def consume_order(db, redis, order_id: int, items: list):
-    """消费者扣库存 + 幂等(三层 Redis setnx + DB 唯一约束 + 查 consumer_idempotent 状态判断)"""
+    """消费者扣库存 + 三层幂等 + 订单行锁串行化(与关单互斥)"""
 
-    # 1. 第一层幂等：Redis 幂等：抢 key, 抢不到说明已处理
+    # 1. 第一层幂等:Redis 幂等,抢 key,抢不到说明已处理
     key = f"idem:order:{order_id}"
     ok = await redis.set(key, "1", nx=True, ex=settings.IDEMPOTENT_TTL_SECONDS)
     if not ok:
         logger.warning(f"[幂等拦截] Redis hit, order_id={order_id}")
         return       # key已存在,已处理，正常返回(调用方 ack)
 
-    # 2. 第三层幂等：查 consumer_idempotent 状态判断
-    # 位置: setnx 之后、插入 consumer_idempotent 之前
-    # 目的: 防"处理中崩溃"留下的半成品(status=0) 和 "失败残留" (status=2)
+    # 2. 第三层幂等:查 consumer_idempotent 状态判断
+    # 只决定要不要插占位,不决定库存操作
     row = db.execute(
         text("SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid"),
         {"oid": order_id}
@@ -319,12 +325,13 @@ async def consume_order(db, redis, order_id: int, items: list):
     if row is not None:
         status = row[0]
         if status == 1:
-            # 已成功处理，直接return 
+            # 已成功处理，直接return
             return
         # status == 0 或 2: 半成品/失败，继续往下处理，但不用再插了
         need_insert = False
 
-    # 3. 第二层幂等：DB 幂等：插占位记录(单独事务 commit, 失败残留 status=0)
+    # 3. 第二层幂等:DB 幂等,插占位记录(单独事务 commit, 失败残留 status=0)
+    # 这次 commit 会释放此前事务内所有行锁,所以订单行锁必须放在它之后拿
     if need_insert:
         try:
             db.execute(text(
@@ -334,24 +341,43 @@ async def consume_order(db, redis, order_id: int, items: list):
             db.commit()
         except IntegrityError:
             # 主键冲突：说明这条记录已存在(可能 Redis 失效导致第一层没拦住)
-            # catch 后跳过插入，直接往下扣库存
             db.rollback()
             logger.warning(f"[幂等拦截] DB hit, order_id={order_id}")
             return    # 已处理，正常返回
 
-    # 3. 每个 item 原子扣库存
-    for item in items:
-        pid = item["product_id"]
-        n = item["order_item_num"]
+    # 4. 订单行锁:关单与扣库存对同一订单排队,堵住"判断到回滚"之间的窗口
+    order_row = db.execute(
+        text("SELECT order_status FROM `order` WHERE order_id = :oid FOR UPDATE"),
+        {"oid": order_id},
+    ).fetchone()
+
+    if order_row is None:
+        db.execute(text(
+            "UPDATE consumer_idempotent SET consume_status = 1, result_msg = :msg WHERE order_id = :oid"
+        ), {"msg": "订单不存在，跳过扣库存", "oid": order_id})
+        db.commit()
+        return
+
+    if order_row[0] == 3:
+        logger.warning(f"[跳过扣库存] 订单已取消 order_id={order_id}")
+        db.execute(text(
+            "UPDATE consumer_idempotent SET consume_status = 1, result_msg = :msg WHERE order_id = :oid"
+        ), {"msg": "订单已取消，跳过扣库存", "oid": order_id})
+        db.commit()
+        return
+
+    # 5. 扣库存(订单锁已持有，关单进不来)
+    # 按 product_id 升序,与关单一致,防死锁
+    for item in sorted(items, key=lambda x: x["product_id"]):
+        pid, n = item["product_id"], item["order_item_num"]
         result = db.execute(text(
             "UPDATE inventory SET total_stock = total_stock - :n, "
             "locked_stock = locked_stock - :n "
             "WHERE product_id = :pid AND locked_stock >= :n"
         ), {"n": n, "pid": pid})
-        if result.rowcount == 0:
-            raise ConsumeStockError(f"扣库存失败: product_id={pid}, n={n}")
+        if result.rowcount == 0: logger.warning(f"[数据异常] 扣库存未生效 order_id={order_id} product_id={pid} n={n}, total/locked 均未改动; 只告警不抛错, 本次仍会置 status=1")
 
-    # 4.更新幂等记录为成功
+    # 6. 标记成功:与扣库存在同一事务同一次 commit
     # 更新 status=1(成功),不管是need_insert=True 还是 False,最终都要更新成1
     db.execute(text(
         "UPDATE consumer_idempotent SET consume_status = 1, result_msg = :msg "
@@ -362,15 +388,17 @@ async def consume_order(db, redis, order_id: int, items: list):
 async def consume_order_timeout(db, order_id: int):
     """
     Day9: 超时关单消费逻辑
-    - status = 0 待支付 -> 关单 + 回滚库存
-    - status != 0 -> 直接返回(幂等：状态已流转，不再关)
-    - 订单不存在 -> 直接返回
-    - 回滚分两种：consumer_idempotent.status=1 说明消费者扣过，只回 total；
-      否则完整回滚 total + locked。FOR UPDATE 锁行防竞态，升序 product_id 防死锁
+    - 订单行锁串行化:锁覆盖"判断 + 改库存 + 改订单状态"全过程,与扣库存互斥
+    - status = 0 待支付 -> 关单 + 回滚库存;status != 0 / 订单不存在 -> 直接返回
+    - 回滚规则:consumer_idempotent.status=1 说明 MQ 扣过(total 已减),只回补 total;
+      否则 MQ 没扣,只释放 locked,total 从没动过,不能加
+    - 按 product_id 升序拿库存锁,与下单/扣库存一致,防死锁
     """
     logger.info("[consume_order_timeout] 开始处理 order_id=%s", order_id)
+
+    # 订单行锁:判断与回滚在同一把锁下完成,堵住 known_issues 第19条的窗口
     order = db.execute(
-        text("SELECT order_status FROM `order` WHERE order_id = :oid"),
+        text("SELECT order_status FROM `order` WHERE order_id = :oid FOR UPDATE"),
         {"oid": order_id}
     ).fetchone()
 
@@ -384,11 +412,11 @@ async def consume_order_timeout(db, order_id: int):
         logger.info("[consume_order_timeout] order_id=%s 已流转(status=%s)，跳过", order_id, status)
         return
 
-    row = db.execute(
+    ci = db.execute(
         text("SELECT consume_status FROM consumer_idempotent WHERE order_id = :oid"),
         {"oid": order_id}
     ).fetchone()
-    consumer_done = row is not None and row[0] == 1
+    consumer_done = ci is not None and ci[0] == 1
 
     items = db.execute(
         text(
@@ -407,22 +435,17 @@ async def consume_order_timeout(db, order_id: int):
             {"pid": pid},
         )
 
+        # MQ 扣过:total 已减过,只回补 total;没扣过:只释放 locked,total 从没动过
         if consumer_done:
             db.execute(
                 text("UPDATE inventory SET total_stock = total_stock + :n WHERE product_id = :pid"),
                 {"n": n, "pid": pid},
             )
         else:
-            result = db.execute(
-                text(
-                    "UPDATE inventory SET total_stock = total_stock + :n, "
-                    "locked_stock = locked_stock - :n "
-                    "WHERE product_id = :pid AND locked_stock >= :n"
-                ),
+            db.execute(
+                text("UPDATE inventory SET locked_stock = locked_stock - :n WHERE product_id = :pid"),
                 {"n": n, "pid": pid},
             )
-            if result.rowcount == 0:
-                raise ConsumeStockError(f"超时回滚库存失败: product_id={pid}")
 
     db.execute(
         text(

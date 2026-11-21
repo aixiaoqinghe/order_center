@@ -6,7 +6,7 @@
 ## Q2 业务闭环
 用户选购商品 → 下单（锁库存） → 生成订单（待支付） → 用户模拟支付（扣金额） → 订单完成 → 返回模拟物流消息
 - 支付失败/超时未支付 → 超时释放库存 → 订单关闭
-- 库存策略：下单时预占（锁库存）并发 MQ，消费者异步实际扣减（total_stock 和 locked_stock）；支付时仅改订单状态；超时未支付则回滚库存（total 和 locked 都加回）
+- 库存策略：下单时只预占（`locked_stock += n`，`total_stock` 不动）并发 MQ，消费者异步实际扣减（`total_stock -= n`、`locked_stock -= n`）且与 `consume_status=1` 同事务提交；支付时仅改订单状态；超时未支付按 `consume_status` 二选一回滚：MQ 已扣过只补 `total_stock += n`，没扣过只释放 `locked_stock -= n`（total 从没减过，不能加）
 
 ## Q3 量级
 - 日订单量：约 1 万

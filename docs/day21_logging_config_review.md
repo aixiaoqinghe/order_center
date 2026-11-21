@@ -81,6 +81,16 @@ grep -rn "print(" scripts/consumer_timeout.py
 ```
 
 
+## 2026-11-19 回归修复后新增的日志
+
+| 位置 | 级别 | 触发条件 / 文案 |
+|---|---|---|
+| `order_service.py` L362 | WARNING | `[跳过扣库存] 订单已取消 order_id=...`：`consume_order` 拿到订单行锁后看到 `order_status=3`，跳过扣库存、置 `consume_status=1` 并正常返回 |
+| `order_service.py` L378 | WARNING | `[数据异常] 扣库存未生效 ...`：扣库存 UPDATE `rowcount=0`（库存行存在但 `locked < n`，或库存行不存在），只告警不抛错、仍置 `status=1` |
+| `order_service.py` L314 | WARNING | `[幂等拦截] Redis hit`（原有）：幂等键已存在时早退。注意正常重复消费与「重试被自己的 key 拦住」打的是同一条日志，无法区分 |
+
+> 三条均沿用 Day21 的统一 format（行号 / 毫秒 / 落文件）。`consumer.py` 的 `except Exception` 分支仍无 logger，属已知可观测性缺口。
+
 ## 已知问题/遗留（留 Day23）：
 
  - 锁失败路径无日志（留 Day23）
